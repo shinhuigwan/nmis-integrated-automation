@@ -1266,21 +1266,6 @@ class ModernSlipUI(ctk.CTk):
         self.lbl_stat_notfound = ctk.CTkLabel(stat_row, text="🔍 미검색: 0건", font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"), text_color="#F59E0B")
         self.lbl_stat_notfound.pack(side="left", padx=8)
 
-        # 📊 데이터 출력 버튼 (상태바 우측에 배치)
-        self.btn_export_stat_row = ctk.CTkButton(
-            stat_row,
-            text="📊 데이터 출력 (엑셀)",
-            font=ctk.CTkFont(family="맑은 고딕", size=11, weight="bold"),
-            fg_color="#10B981",
-            hover_color="#059669",
-            text_color="#FFFFFF",
-            width=140,
-            height=28,
-            corner_radius=8,
-            command=self.export_member_results
-        )
-        self.btn_export_stat_row.pack(side="right", padx=(10, 0))
-
         self.progress_member = ctk.CTkProgressBar(card2, fg_color="#120F24", progress_color="#8B5CF6", height=8)
         self.progress_member.pack(fill="x", padx=20, pady=(0, 12))
         self.progress_member.set(0.0)
@@ -1414,7 +1399,7 @@ class ModernSlipUI(ctk.CTk):
                         )
                         messagebox.showinfo(
                             "검수 완료",
-                            f"회원 데이터 검수가 완료되었습니다!\n\n• 전체 검수: {res['total']}건\n• ✅ 일치: {res['match_count']}건\n• ❌ 불일치: {res['mismatch_count']}건\n• 🔍 미검색: {res['not_found_count']}건\n\n상태바 우측의 [📊 데이터 출력 (엑셀)] 버튼을 눌러 엑셀 파일로 결과를 추출할 수 있습니다!"
+                            f"회원 데이터 검수가 완료되었습니다!\n\n• 전체 검수: {res['total']}건\n• ✅ 일치: {res['match_count']}건\n• ❌ 불일치: {res['mismatch_count']}건\n• 🔍 미검색: {res['not_found_count']}건\n\n[📥 검수 결과 엑셀 저장] 버튼을 눌러 엑셀 파일로 결과를 저장하실 수 있습니다."
                         )
                     self.after(0, on_complete)
             except Exception as e:
@@ -1432,7 +1417,9 @@ class ModernSlipUI(ctk.CTk):
     def stop_member_verification(self) -> None:
         if self.is_member_verifying:
             self.member_stop_event.set()
-            self.lbl_member_status.configure(text="⏹ 사용자 요청으로 중지 중...", text_color="#EF4444")
+            self.lbl_member_status.configure(text="⏹ 사용자에 의해 중지되었습니다. (현재까지 완료된 건은 엑셀 저장 가능)", text_color="#EF4444")
+            self.btn_start_member.configure(state="normal")
+            self.btn_stop_member.configure(state="disabled")
 
     def export_member_results(self) -> None:
         if not self.member_results_list:
