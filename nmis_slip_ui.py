@@ -19,6 +19,8 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
 import customtkinter as ctk
+import openpyxl
+import pandas as pd
 from playwright.sync_api import sync_playwright
 
 # ── 모듈 임포트 ─────────────────────────────────────────────────────────────
@@ -130,16 +132,25 @@ def cdp_is_ready() -> bool:
         return False
 
 
-# ── 메인 UI 클래스 (CustomTkinter 기반) ──────────────────────────────────────
-
 class ModernSlipUI(ctk.CTk):
+    def _center_window(self, width: int = 1120, height: int = 780) -> None:
+        try:
+            self.update_idletasks()
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            x = max(0, (sw - width) // 2)
+            y = max(0, (sh - height) // 2)
+            self.geometry(f"{width}x{height}+{x}+{y}")
+        except Exception:
+            self.geometry(f"{width}x{height}")
+
     def __init__(self) -> None:
         super().__init__()
 
         load_settings()
 
         self.title("통합 자동화 시스템 — Modern Dark Edition")
-        self.geometry("1100x760")
+        self._center_window(1120, 780)
         self.minsize(980, 680)
 
         # 변수 데이터
@@ -1442,12 +1453,13 @@ class ModernSlipUI(ctk.CTk):
                     "검수세부사유": r.reason
                 })
 
-        # member_results_list가 비어있을 경우 화면의 테이블 목록에서 직접 수집
-        if not data and hasattr(self, "member_tree"):
+        # 화면 테이블(Treeview)에 있는 데이터 백업 수집
+        tree_data = []
+        if hasattr(self, "member_tree"):
             for child in self.member_tree.get_children():
                 vals = self.member_tree.item(child, "values")
                 if vals and len(vals) >= 8:
-                    data.append({
+                    tree_data.append({
                         "순번": vals[0],
                         "업소명(F열)": vals[1],
                         "엑셀대표자(G열)": vals[2],
@@ -1458,28 +1470,58 @@ class ModernSlipUI(ctk.CTk):
                         "검수세부사유": vals[7]
                     })
 
+        # 화면에 보이는 건수가 더 많으면 화면 데이터 우선 채택
+        if len(tree_data) >= len(data) and len(tree_data) > 0:
+            data = tree_data
+
         if not data:
-            self.lbl_member_status.configure(text="⚠️ 저장할 검수 결과 데이터가 없습니다. 먼저 검수를 진행해 주세요.", text_color="#EF4444")
+            messagebox.showwarning("저장 경고", "저장할 검수 결과 데이터가 없습니다. 먼저 회원 정보 검수를 진행해 주세요.", parent=self)
             return
 
-        desktop_path = Path.home() / "Desktop"
-        default_filename = f"NMIS_회원검수결과_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        out_path = desktop_path / default_filename
+        # 바탕화면 경로 탐색 (한글/OneDrive 대응)
+        user_home = Path.home()
+        desktop_dir = user_home / "Desktop"
+        for c in [user_home / "Desktop", user_home / "OneDrive" / "Desktop", user_home / "OneDrive" / "바탕 화면", user_home / "바탕 화면"]:
+            if c.is_dir():
+                desktop_dir = c
+                break
+
+        default_filename = f"NMIS_회원검수결과_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+        out_path = filedialog.asksaveasfilename(
+            parent=self,
+            title="검수 결과 엑셀 파일 저장 위치 선택",
+            defaultextension=".xlsx",
+            filetypes=(("Excel 파일 (*.xlsx)", "*.xlsx"), ("모든 파일 (*.*)", "*.*")),
+            initialdir=str(desktop_dir),
+            initialfile=default_filename
+        )
+
+        # 사용자가 대화상자를 닫으면 바탕화면 기본 경로로 자동 지정
+        if not out_path:
+            out_path = str(desktop_dir / default_filename)
 
         try:
-            import pandas as pd
             df = pd.DataFrame(data)
             df.to_excel(out_path, index=False)
 
-            log_msg = f"📊 총 {len(data)}건의 검수 결과가 바탕화면에 저장되었습니다: {default_filename}"
-            self.log(log_msg)
+            log_msg = f"📊 총 {len(data)}건의 회원검수 결과가 엑셀로 저장되었습니다!"
+            self.log(f"{log_msg} ({out_path})")
             self.lbl_member_status.configure(text=f"✅ {log_msg}", text_color="#10B981")
 
-            # 자동으로 생성된 엑셀 파일 바로 열기
-            os.startfile(out_path)
+            messagebox.showinfo(
+                "엑셀 저장 완료",
+                f"🎉 회원검수 결과 총 {len(data)}건이 성공적으로 저장되었습니다!\n\n저장 위치:\n{out_path}\n\n[확인]을 누르면 생성된 엑셀 파일이 바로 열립니다.",
+                parent=self
+            )
+
+            try:
+                os.startfile(out_path)
+            except Exception:
+                pass
         except Exception as e:
-            self.lbl_member_status.configure(text=f"❌ 엑셀 저장 실패: {e}", text_color="#EF4444")
-            self.log(f"엑셀 저장 오류: {e}")
+            messagebox.showerror("저장 오류", f"엑셀 저장 중 오류가 발생했습니다:\n{e}", parent=self)
+            self.log(f"❌ 엑셀 저장 실패: {e}")
 
 
 
