@@ -1417,31 +1417,14 @@ class ModernSlipUI(ctk.CTk):
     def stop_member_verification(self) -> None:
         if self.is_member_verifying:
             self.member_stop_event.set()
-            self.lbl_member_status.configure(text="⏹ 사용자에 의해 중지되었습니다. (현재까지 완료된 건은 엑셀 저장 가능)", text_color="#EF4444")
+            self.is_member_verifying = False
             self.btn_start_member.configure(state="normal")
             self.btn_stop_member.configure(state="disabled")
+            self.lbl_member_status.configure(text="⏹ 사용자에 의해 중지되었습니다. (현재까지 완료된 건은 엑셀 저장 가능)", text_color="#EF4444")
 
     def export_member_results(self) -> None:
-        if not self.member_results_list:
-            messagebox.showwarning("저장 경고", "저장할 검수 결과 데이터가 없습니다. 먼저 검수를 진행해 주세요.")
-            return
-
-        desktop_path = Path.home() / "Desktop"
-        default_filename = f"NMIS_회원검수결과_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-
-        out_path = filedialog.asksaveasfilename(
-            title="검수 결과 엑셀 파일 저장",
-            defaultextension=".xlsx",
-            filetypes=(("Excel 파일", "*.xlsx"), ("모든 파일", "*.*")),
-            initialdir=str(desktop_path),
-            initialfile=default_filename
-        )
-        if not out_path:
-            return
-
-        try:
-            import pandas as pd
-            data = []
+        data = []
+        if self.member_results_list:
             for r in self.member_results_list:
                 data.append({
                     "순번": r.seq,
@@ -1453,18 +1436,56 @@ class ModernSlipUI(ctk.CTk):
                     "검수상태": r.status,
                     "검수세부사유": r.reason
                 })
+
+        # member_results_list가 비어있을 경우 화면의 테이블 목록에서 직접 수집
+        if not data and hasattr(self, "member_tree"):
+            for child in self.member_tree.get_children():
+                vals = self.member_tree.item(child, "values")
+                if vals and len(vals) >= 8:
+                    data.append({
+                        "순번": vals[0],
+                        "업소명(F열)": vals[1],
+                        "엑셀대표자(G열)": vals[2],
+                        "웹대표자": vals[3],
+                        "엑셀인허가번호(D열)": vals[4],
+                        "웹신고번호": vals[5],
+                        "검수상태": vals[6],
+                        "검수세부사유": vals[7]
+                    })
+
+        if not data:
+            messagebox.showwarning("저장 경고", "저장할 검수 결과 데이터가 없습니다. 먼저 검수를 진행해 주세요.", parent=self)
+            return
+
+        desktop_path = Path.home() / "Desktop"
+        default_filename = f"NMIS_회원검수결과_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+        out_path = filedialog.asksaveasfilename(
+            parent=self,
+            title="검수 결과 엑셀 파일 저장",
+            defaultextension=".xlsx",
+            filetypes=(("Excel 파일", "*.xlsx"), ("모든 파일", "*.*")),
+            initialdir=str(desktop_path),
+            initialfile=default_filename
+        )
+        if not out_path:
+            return
+
+        try:
+            import pandas as pd
             df = pd.DataFrame(data)
             df.to_excel(out_path, index=False)
             self.log(f"📊 검수 결과 엑셀 저장 완료: {out_path}")
 
             res = messagebox.askyesno(
                 "저장 완료",
-                f"검수 결과가 성공적으로 엑셀 파일로 저장되었습니다!\n\n저장 경로: {out_path}\n\n지금 생성된 엑셀 파일을 바로 열어보시겠습니까?"
+                f"검수 결과 총 {len(data)}건이 성공적으로 엑셀 파일로 저장되었습니다!\n\n저장 경로: {out_path}\n\n지금 생성된 엑셀 파일을 바로 열어보시겠습니까?",
+                parent=self
             )
             if res:
                 os.startfile(out_path)
         except Exception as e:
-            messagebox.showerror("저장 실패", f"엑셀 저장 중 오류 발생:\n{e}")
+            messagebox.showerror("저장 실패", f"엑셀 저장 중 오류 발생:\n{e}", parent=self)
 
 
 
