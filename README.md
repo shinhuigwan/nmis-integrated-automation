@@ -1,6 +1,6 @@
-# ⚡ NMIS (통합) 전표 & 26년 월보고 자동화 시스템 (Modern Dark Edition)
+# ⚡ NMIS (통합) 전표 & 월보고 자동화 시스템 (Modern Dark Edition)
 
-> **한국외식업중앙회 통합 회계 및 회원 관리 시스템 (NMIS)** 과 **26년 월보고 엑셀 파일** 간의 데이터를 실시간으로 수집·기입·검수하고, **발송대장 5건 자동 등록** 및 **전표 자동 기입**을 지원하는 럭셔리 다크 모드 자동화 프로그램입니다.
+> **한국외식업중앙회 통합 회계 및 회원 관리 시스템 (NMIS)** 과 **월보고 엑셀 파일** 간의 데이터를 실시간으로 수집·기입·검수하고, **발송대장 5건 자동 등록** 및 **전표 자동 기입**을 지원하는 럭셔리 다크 모드 자동화 프로그램입니다.
 
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Automation-2EAD33?style=for-the-badge&logo=playwright&logoColor=white)

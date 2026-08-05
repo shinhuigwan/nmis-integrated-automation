@@ -238,7 +238,7 @@ class ModernSlipUI(ctk.CTk):
         ).pack(anchor="w")
         ctk.CTkLabel(
             logo_frame,
-            text="전표 & 26년 월보고 시스템",
+            text="전표 & 월보고 시스템",
             font=ctk.CTkFont(family="맑은 고딕", size=10),
             text_color="#94A3B8"
         ).pack(anchor="w")
@@ -246,7 +246,7 @@ class ModernSlipUI(ctk.CTk):
         # 탭 선택 버튼
         self.btn_tab_monthly = ctk.CTkButton(
             self.sidebar,
-            text="📊 26년 월보고 자동 연동",
+            text="📊 월보고 자동 연동",
             font=ctk.CTkFont(family="맑은 고딕", size=13, weight="bold"),
             fg_color="#8B5CF6",
             hover_color="#7C3AED",
@@ -364,7 +364,7 @@ class ModernSlipUI(ctk.CTk):
         if tab_name == "monthly":
             self.tab_monthly_frame.grid(row=1, column=0, padx=24, pady=10, sticky="nsew")
             self.btn_tab_monthly.configure(fg_color="#8B5CF6", text_color="#FFFFFF")
-            self.main_title_label.configure(text="📊 26년 월보고 자동 연동 시스템")
+            self.main_title_label.configure(text="📊 월보고 자동 연동 시스템")
         elif tab_name == "slip":
             self.tab_slip_frame.grid(row=1, column=0, padx=24, pady=10, sticky="nsew")
             self.btn_tab_slip.configure(fg_color="#8B5CF6", text_color="#FFFFFF")
