@@ -2703,7 +2703,325 @@ def register_ship_documents_on_nmis(
     }
 
 
+@dataclass
+class MemberVerificationResult:
+    seq: int
+    store_name: str
+    excel_owner: str
+    web_owner: str
+    excel_license: str
+    web_license: str
+    status: str  # "일치", "불일치", "미검색", "오류"
+    reason: str
+
+
+def verify_member_info_from_nmis(
+    target: BrowserContext | Page | object,
+    excel_path: str,
+    check_license: bool = False,
+    status_callback: Callable[[dict], None] | None = None,
+    stop_event: threading.Event | None = None,
+) -> dict:
+    """
+    Downloads/일반음식점현황 엑셀 데이터를 읽어 NMIS 회원관리 메뉴에서
+    업소명(F열) 및 영업자/대표자(G열), 인허가번호(D열) 일치 여부를 자동 검수하고
+    불일치/미검색 결과를 리턴합니다.
+    """
+    import pandas as pd
+
+    def log(msg: str):
+        print(f"[회원검수] {msg}")
+        if status_callback:
+            status_callback({"type": "log", "message": msg})
+
+    page = find_nmis_page(target)
+    log(f"엑셀 데이터 로드 중: {os.path.basename(excel_path)}")
+
+    if not os.path.exists(excel_path):
+        raise FileNotFoundError(f"엑셀 파일을 찾을 수 없습니다: {excel_path}")
+
+    try:
+        df = pd.read_excel(excel_path)
+    except Exception as e:
+        raise RuntimeError(f"엑셀 파일 읽기 실패: {e}")
+
+    # 컬럼 인덱스/이름 파악 (F열=5: 업소명, G열=6: 영업자, D열=3: 인허가번호)
+    col_store = None
+    col_owner = None
+    col_license = None
+
+    for col in df.columns:
+        col_str = str(col).strip()
+        if "업소명" in col_str or "상호" in col_str:
+            col_store = col
+        elif "영업자" in col_str or "대표자" in col_str:
+            col_owner = col
+        elif "인허가번호" in col_str or "신고번호" in col_str:
+            col_license = col
+
+    # Fallback to column index if header name not matched
+    if col_store is None and len(df.columns) > 5:
+        col_store = df.columns[5]
+    if col_owner is None and len(df.columns) > 6:
+        col_owner = df.columns[6]
+    if col_license is None and len(df.columns) > 3:
+        col_license = df.columns[3]
+
+    log(f"매핑된 컬럼 -> 업소명: '{col_store}', 대표자: '{col_owner}', 인허가번호: '{col_license}'")
+
+    total_rows = len(df)
+    results: list[MemberVerificationResult] = []
+    match_count = 0
+    mismatch_count = 0
+    not_found_count = 0
+    error_count = 0
+
+    # 1. 회원관리 메뉴 이동
+    log("NMIS 회원 > 회원관리 > 회원관리 메뉴 이동 중...")
+    try:
+        # SPA 라우트가 있을 경우 직접 이동 시도
+        current_url = page.url
+        if "#/member/info/list" not in current_url:
+            page.goto("http://nmis.foodservice.or.kr/#/member/info/list", wait_until="networkidle", timeout=10000)
+            page.wait_for_timeout(1500)
+    except Exception:
+        # 메뉴 클릭 시도
+        try:
+            member_menu = page.locator("a:has-text('회원')").first
+            if member_menu.is_visible():
+                member_menu.click()
+                page.wait_for_timeout(500)
+            sub_menu = page.locator("a:has-text('회원관리')").first
+            if sub_menu.is_visible():
+                sub_menu.click()
+                page.wait_for_timeout(1000)
+        except Exception as e:
+            log(f"메뉴 이동 주의: {e}")
+
+    # 상호 검색어 입력창 선택자 후보 목록
+    search_input_selectors = [
+        "input[ng-model*='searchWord']",
+        "input[ng-model*='storeName']",
+        "input[ng-model*='businessName']",
+        "input[name='storeName']",
+        "input[placeholder*='상호']",
+        "th:has-text('상호') + td input",
+        "td:has-text('상호') + td input",
+        "tr:has-text('상호') input",
+    ]
+
+    # 조회 버튼 선택자 후보 목록
+    search_btn_selectors = [
+        "span.button_icon[lang-code='search']",
+        "button:has-text('조회')",
+        "a:has-text('조회')",
+        ".btn:has-text('조회')",
+    ]
+
+    for idx, row in df.iterrows():
+        if stop_event and stop_event.is_set():
+            log("🛑 사용자에 의해 검수가 중단되었습니다.")
+            break
+
+        seq = idx + 1
+        store_name = str(row[col_store]).strip() if pd.notna(row[col_store]) else ""
+        excel_owner = str(row[col_owner]).strip() if pd.notna(row[col_owner]) else ""
+        excel_license = str(row[col_license]).strip() if pd.notna(row[col_license]) else ""
+
+        if not store_name or store_name.lower() == "nan":
+            continue
+
+        log(f"[{seq}/{total_rows}] 업소 검색 중: {store_name} (엑셀 대표자: {excel_owner})")
+
+        res_status = "오류"
+        res_reason = ""
+        web_owner = ""
+        web_license = ""
+
+        try:
+            # 회원관리 목록 페이지인지 확인 및 복귀
+            if "#/member/info/list" not in page.url:
+                try:
+                    page.goto("http://nmis.foodservice.or.kr/#/member/info/list", timeout=5000)
+                    page.wait_for_timeout(1000)
+                except Exception:
+                    pass
+
+            # 상호 입력창 찾기
+            input_elem = None
+            for sel in search_input_selectors:
+                loc = page.locator(sel).first
+                if loc.is_visible():
+                    input_elem = loc
+                    break
+
+            if not input_elem:
+                # 일반 텍스트 input 중 첫 번째 검색창 시도
+                inputs = page.locator("input[type='text']:visible")
+                if inputs.count() > 0:
+                    input_elem = inputs.first
+
+            if not input_elem:
+                res_status = "오류"
+                res_reason = "상호 검색 입력창을 찾을 수 없음"
+                error_count += 1
+            else:
+                input_elem.fill(store_name)
+                page.wait_for_timeout(200)
+
+                # 조회 버튼 클릭
+                search_btn = None
+                for btn_sel in search_btn_selectors:
+                    b_loc = page.locator(btn_sel).first
+                    if b_loc.is_visible():
+                        search_btn = b_loc
+                        break
+
+                if search_btn:
+                    search_btn.click()
+                else:
+                    input_elem.press("Enter")
+
+                page.wait_for_timeout(1200)
+
+                # 검색 결과 행 존재 여부 체크
+                # 테이블 행 또는 ui-grid 행 탐색
+                row_locator = page.locator("epro-grid tbody tr, table.grid_table tbody tr, .ui-grid-row").filter(has_text=store_name)
+                if row_locator.count() == 0:
+                    # 전체 행이라도 있는지 확인
+                    row_locator = page.locator("epro-grid tbody tr, table.grid_table tbody tr, .ui-grid-row")
+
+                # 결과 0건 체크 (데이터 없음 메시지 또는 0개)
+                no_data_msg = page.locator("text='조회된 데이터가 없습니다'").first
+                if no_data_msg.is_visible() or row_locator.count() == 0:
+                    res_status = "미검색"
+                    res_reason = "NMIS 상호 검색 결과 0건"
+                    not_found_count += 1
+                else:
+                    # 1행 선택 체크박스 체크 후 수정 버튼 클릭
+                    first_row = row_locator.first
+                    chk_box = first_row.locator("input[type='checkbox']").first
+
+                    if chk_box.is_visible():
+                        if not chk_box.is_checked():
+                            chk_box.check()
+                    else:
+                        # 행 클릭 시도
+                        first_row.click()
+
+                    page.wait_for_timeout(300)
+
+                    # 수정 버튼 클릭
+                    edit_btn = page.locator("span.button_icon[lang-code='update'], button:has-text('수정'), a:has-text('수정')").first
+                    if edit_btn.is_visible():
+                        edit_btn.click()
+                        page.wait_for_timeout(1200)
+
+                        # 대표자 정보 추출 (input or text)
+                        owner_inputs = page.locator("input[ng-model*='ceoName'], input[ng-model*='repName'], input[ng-model*='ownerName'], input[name='repName']")
+                        if owner_inputs.count() > 0 and owner_inputs.first.is_visible():
+                            web_owner = owner_inputs.first.input_value().strip()
+                        else:
+                            # th:has-text('대표자') 인접 td
+                            td_owner = page.locator("th:has-text('대표자') + td, th:has-text('영업자') + td, td:has-text('대표자') + td").first
+                            if td_owner.is_visible():
+                                web_owner = td_owner.text_content().strip()
+
+                        # 신고번호/인허가번호 추출
+                        license_inputs = page.locator("input[ng-model*='reportNo'], input[ng-model*='licenseNo'], input[ng-model*='accNo']")
+                        if license_inputs.count() > 0 and license_inputs.first.is_visible():
+                            web_license = license_inputs.first.input_value().strip()
+                        else:
+                            td_lic = page.locator("th:has-text('신고번호') + td, th:has-text('인허가') + td, td:has-text('신고번호') + td").first
+                            if td_lic.is_visible():
+                                web_license = td_lic.text_content().strip()
+
+                        # 목록 버튼 클릭하여 복귀
+                        list_btn = page.locator("span.button_icon[lang-code='list'], button:has-text('목록'), a:has-text('목록')").first
+                        if list_btn.is_visible():
+                            list_btn.click()
+                            page.wait_for_timeout(800)
+                        else:
+                            page.goto("http://nmis.foodservice.or.kr/#/member/info/list", timeout=5000)
+                            page.wait_for_timeout(800)
+
+                        # 일치 여부 비교
+                        norm_excel_owner = re.sub(r"\s+", "", excel_owner)
+                        norm_web_owner = re.sub(r"\s+", "", web_owner)
+
+                        owner_matched = (norm_excel_owner == norm_web_owner) or (norm_excel_owner in norm_web_owner) or (norm_web_owner in norm_excel_owner)
+
+                        license_matched = True
+                        if check_license:
+                            norm_excel_lic = re.sub(r"[^0-9a-zA-Z]", "", excel_license)
+                            norm_web_lic = re.sub(r"[^0-9a-zA-Z]", "", web_license)
+                            if norm_excel_lic and norm_web_lic:
+                                license_matched = (norm_excel_lic == norm_web_lic) or (norm_excel_lic in norm_web_lic) or (norm_web_lic in norm_excel_lic)
+                            elif norm_excel_lic and not norm_web_lic:
+                                license_matched = False
+
+                        if owner_matched and license_matched:
+                            res_status = "일치"
+                            res_reason = "대표자명 및 인허가/신고번호 일치" if check_license else "대표자명 일치"
+                            match_count += 1
+                        else:
+                            res_status = "불일치"
+                            reasons = []
+                            if not owner_matched:
+                                reasons.append(f"대표자명 불일치 (엑셀: {excel_owner} / 웹: {web_owner})")
+                            if check_license and not license_matched:
+                                reasons.append(f"신고번호 불일치 (엑셀: {excel_license} / 웹: {web_license})")
+                            res_reason = " | ".join(reasons)
+                            mismatch_count += 1
+                    else:
+                        res_status = "오류"
+                        res_reason = "수정 버튼을 찾을 수 없음"
+                        error_count += 1
+
+        except Exception as ex:
+            res_status = "오류"
+            res_reason = f"검수 예외: {str(ex)[:100]}"
+            error_count += 1
+
+        res_item = MemberVerificationResult(
+            seq=seq,
+            store_name=store_name,
+            excel_owner=excel_owner,
+            web_owner=web_owner,
+            excel_license=excel_license,
+            web_license=web_license,
+            status=res_status,
+            reason=res_reason,
+        )
+        results.append(res_item)
+
+        if status_callback:
+            status_callback({
+                "type": "item_processed",
+                "item": res_item,
+                "current": len(results),
+                "total": total_rows,
+                "match_count": match_count,
+                "mismatch_count": mismatch_count,
+                "not_found_count": not_found_count,
+                "error_count": error_count,
+            })
+
+    log(f"🎉 검수 완료! 전체: {total_rows}건 | 일치: {match_count}건 | 불일치: {mismatch_count}건 | 미검색: {not_found_count}건 | 오류: {error_count}건")
+
+    return {
+        "success": True,
+        "total": total_rows,
+        "match_count": match_count,
+        "mismatch_count": mismatch_count,
+        "not_found_count": not_found_count,
+        "error_count": error_count,
+        "results": results,
+    }
+
+
 if __name__ == "__main__":
+
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:
