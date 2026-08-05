@@ -90,8 +90,42 @@ CONFIRM_SELECTORS = [
 
 MACRO_STEPS: list[dict] = []
 
+SLIP_COLUMN_MAPPING: dict[str, str] = {
+    "date": "A",
+    "type": "F",
+    "dir": "C",
+    "amount": "D",
+    "content": "E",
+}
+
+MEMBER_COLUMN_MAPPING: dict[str, str] = {
+    "store_name": "F",
+    "owner_name": "G",
+    "license_no": "D",
+}
+
+def get_excel_column_headers(file_path: str) -> list[dict]:
+    if not file_path or not os.path.exists(file_path):
+        return []
+    try:
+        df = pd.read_excel(file_path, nrows=1)
+        cols = []
+        for idx, col in enumerate(df.columns):
+            letter = chr(65 + idx) if idx < 26 else f"A{chr(65 + idx - 26)}"
+            col_name = str(col).strip()
+            cols.append({
+                "index": idx,
+                "letter": letter,
+                "header": col_name,
+                "display": f"[{letter}열] {col_name}"
+            })
+        return cols
+    except Exception as e:
+        print(f"헤더 읽기 예외: {e}")
+        return []
+
 def load_settings() -> None:
-    global KEYWORD_RULES, CONFIRM_SELECTORS, MACRO_STEPS, NMIS_USER_ID, NMIS_PASSWORD
+    global KEYWORD_RULES, CONFIRM_SELECTORS, MACRO_STEPS, NMIS_USER_ID, NMIS_PASSWORD, SLIP_COLUMN_MAPPING, MEMBER_COLUMN_MAPPING
     if not SETTINGS_FILE.is_file():
         return
     try:
@@ -106,6 +140,10 @@ def load_settings() -> None:
             NMIS_USER_ID = data["nmis_user_id"]
         if "nmis_password" in data:
             NMIS_PASSWORD = data["nmis_password"]
+        if "slip_column_mapping" in data:
+            SLIP_COLUMN_MAPPING.update(data["slip_column_mapping"])
+        if "member_column_mapping" in data:
+            MEMBER_COLUMN_MAPPING.update(data["member_column_mapping"])
     except Exception as e:
         print(f"설정 로드 실패: {e}")
 
@@ -116,6 +154,8 @@ def save_settings() -> None:
         "macro_steps": MACRO_STEPS,
         "nmis_user_id": NMIS_USER_ID,
         "nmis_password": NMIS_PASSWORD,
+        "slip_column_mapping": SLIP_COLUMN_MAPPING,
+        "member_column_mapping": MEMBER_COLUMN_MAPPING,
     }
     try:
         SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -563,7 +603,8 @@ class ModernSlipUI(ctk.CTk):
         ctk.CTkLabel(f_row, text="1. 거래내역 파일:", font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"), text_color="#E2E8F0").pack(side="left", padx=(0, 8))
         ctk.CTkEntry(f_row, textvariable=self.file_var, font=ctk.CTkFont(family="맑은 고딕", size=12), fg_color="#120F24", border_color="#3B326B", corner_radius=8).pack(side="left", fill="x", expand=True, padx=(0, 8))
         ctk.CTkButton(f_row, text="파일 선택", width=90, fg_color="#374151", hover_color="#4B5563", font=ctk.CTkFont(family="맑은 고딕", size=12), corner_radius=8, command=self.browse_file).pack(side="left", padx=(0, 4))
-        ctk.CTkButton(f_row, text="불러오기", width=90, fg_color="#8B5CF6", hover_color="#7C3AED", font=ctk.CTkFont(family="맑은 고딕", size=12), corner_radius=8, command=self.load_excel).pack(side="left")
+        ctk.CTkButton(f_row, text="불러오기", width=90, fg_color="#8B5CF6", hover_color="#7C3AED", font=ctk.CTkFont(family="맑은 고딕", size=12), corner_radius=8, command=self.load_excel).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(f_row, text="⚙️ 엑셀 컬럼 설정", width=120, fg_color="#374151", hover_color="#4B5563", font=ctk.CTkFont(family="맑은 고딕", size=11, weight="bold"), corner_radius=8, command=self.open_slip_column_settings_dialog).pack(side="left")
 
         # Row 2: Dates
         d_row = ctk.CTkFrame(card1, fg_color="transparent")
@@ -1190,6 +1231,17 @@ class ModernSlipUI(ctk.CTk):
             width=90,
             height=32,
             command=browse_member_excel
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            file_row,
+            text="⚙️ 엑셀 컬럼 설정",
+            font=ctk.CTkFont(family="맑은 고딕", size=11, weight="bold"),
+            fg_color="#8B5CF6",
+            hover_color="#7C3AED",
+            width=120,
+            height=32,
+            command=self.open_member_column_settings_dialog
         ).pack(side="left")
 
         # 검수 옵션 Row
@@ -1399,6 +1451,9 @@ class ModernSlipUI(ctk.CTk):
                         check_license=self.check_license_var.get(),
                         status_callback=status_cb,
                         stop_event=self.member_stop_event,
+                        custom_col_store=MEMBER_COLUMN_MAPPING.get("store_name"),
+                        custom_col_owner=MEMBER_COLUMN_MAPPING.get("owner_name"),
+                        custom_col_license=MEMBER_COLUMN_MAPPING.get("license_no"),
                     )
                     def on_complete():
                         self.is_member_verifying = False
@@ -1426,6 +1481,208 @@ class ModernSlipUI(ctk.CTk):
                 self.after(0, on_error)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _center_dialog(self, dlg: ctk.CTkToplevel, width: int = 520, height: int = 460) -> None:
+        try:
+            dlg.update_idletasks()
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            x = max(0, (sw - width) // 2)
+            y = max(0, (sh - height) // 2)
+            dlg.geometry(f"{width}x{height}+{x}+{y}")
+        except Exception:
+            dlg.geometry(f"{width}x{height}")
+
+    def open_member_column_settings_dialog(self) -> None:
+        excel_p = self.member_excel_var.get().strip()
+        headers = get_excel_column_headers(excel_p) if excel_p and os.path.isfile(excel_p) else []
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("⚙️ 회원검수 엑셀 컬럼 매핑 설정")
+        dlg.geometry("520x460")
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.grab_set()
+        self._center_dialog(dlg, 520, 460)
+
+        ctk.CTkLabel(
+            dlg,
+            text="⚙️ [회원 검수] 엑셀 컬럼 매핑 지정",
+            font=ctk.CTkFont(family="맑은 고딕", size=16, weight="bold"),
+            text_color="#A855F7"
+        ).pack(anchor="w", padx=24, pady=(20, 8))
+
+        if headers:
+            file_name = os.path.basename(excel_p)
+            header_preview = ", ".join([h["display"] for h in headers[:6]])
+            subtitle = f"📄 엑셀 파일: {file_name}\n💡 감지된 최상단 헤더: {header_preview}..."
+        else:
+            subtitle = "💡 엑셀 파일 선택 시 최상단 헤더(1행)가 자동으로 감지 나열됩니다.\n필요한 데이터의 열(A~Z)을 지정하세요."
+
+        ctk.CTkLabel(
+            dlg,
+            text=subtitle,
+            font=ctk.CTkFont(family="맑은 고딕", size=11),
+            text_color="#94A3B8",
+            justify="left"
+        ).pack(anchor="w", padx=24, pady=(0, 16))
+
+        if headers:
+            options = [h["display"] for h in headers]
+            def get_default_opt(key_type: str, default_letter: str) -> str:
+                curr = MEMBER_COLUMN_MAPPING.get(key_type, default_letter)
+                for h in headers:
+                    if h["letter"] == curr or curr in h["header"] or h["header"] in curr:
+                        return h["display"]
+                return options[0]
+        else:
+            options = [f"[{chr(65+i)}열] 항목_{i+1}" for i in range(20)]
+            def get_default_opt(key_type: str, default_letter: str) -> str:
+                curr = MEMBER_COLUMN_MAPPING.get(key_type, default_letter)
+                idx = ord(curr[0].upper()) - 65 if len(curr) == 1 and curr.isalpha() else 0
+                return options[idx] if idx < len(options) else options[0]
+
+        # 1. 업소명
+        f1 = ctk.CTkFrame(dlg, fg_color="#18152E", corner_radius=10)
+        f1.pack(fill="x", padx=24, pady=6)
+        ctk.CTkLabel(f1, text="🏢 업소명 (상호명) 컬럼:", font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"), text_color="#E2E8F0").pack(side="left", padx=12, pady=10)
+        combo_store = ctk.CTkComboBox(f1, values=options, width=220, font=ctk.CTkFont(family="맑은 고딕", size=12), dropdown_font=ctk.CTkFont(family="맑은 고딕", size=11))
+        combo_store.pack(side="right", padx=12, pady=10)
+        combo_store.set(get_default_opt("store_name", "F"))
+
+        # 2. 대표자 성명
+        f2 = ctk.CTkFrame(dlg, fg_color="#18152E", corner_radius=10)
+        f2.pack(fill="x", padx=24, pady=6)
+        ctk.CTkLabel(f2, text="👤 대표자 성명 컬럼:", font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"), text_color="#E2E8F0").pack(side="left", padx=12, pady=10)
+        combo_owner = ctk.CTkComboBox(f2, values=options, width=220, font=ctk.CTkFont(family="맑은 고딕", size=12), dropdown_font=ctk.CTkFont(family="맑은 고딕", size=11))
+        combo_owner.pack(side="right", padx=12, pady=10)
+        combo_owner.set(get_default_opt("owner_name", "G"))
+
+        # 3. 인허가/신고번호
+        f3 = ctk.CTkFrame(dlg, fg_color="#18152E", corner_radius=10)
+        f3.pack(fill="x", padx=24, pady=6)
+        ctk.CTkLabel(f3, text="🔢 인허가(신고)번호 컬럼:", font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"), text_color="#E2E8F0").pack(side="left", padx=12, pady=10)
+        combo_license = ctk.CTkComboBox(f3, values=options, width=220, font=ctk.CTkFont(family="맑은 고딕", size=12), dropdown_font=ctk.CTkFont(family="맑은 고딕", size=11))
+        combo_license.pack(side="right", padx=12, pady=10)
+        combo_license.set(get_default_opt("license_no", "D"))
+
+        btn_box = ctk.CTkFrame(dlg, fg_color="transparent")
+        btn_box.pack(fill="x", padx=24, pady=(20, 10))
+
+        def parse_letter(val_str: str) -> str:
+            if val_str.startswith("[") and "열]" in val_str:
+                return val_str.split("]")[0].replace("[", "").replace("열", "").strip()
+            return val_str
+
+        def save_mapping():
+            MEMBER_COLUMN_MAPPING["store_name"] = parse_letter(combo_store.get())
+            MEMBER_COLUMN_MAPPING["owner_name"] = parse_letter(combo_owner.get())
+            MEMBER_COLUMN_MAPPING["license_no"] = parse_letter(combo_license.get())
+            save_settings()
+            messagebox.showinfo("저장 완료", f"✅ 회원검수 엑셀 컬럼 매핑이 저장되었습니다!\n\n• 업소명: {MEMBER_COLUMN_MAPPING['store_name']}열\n• 대표자성명: {MEMBER_COLUMN_MAPPING['owner_name']}열\n• 인허가번호: {MEMBER_COLUMN_MAPPING['license_no']}열", parent=dlg)
+            dlg.destroy()
+
+        def reset_mapping():
+            MEMBER_COLUMN_MAPPING["store_name"] = "F"
+            MEMBER_COLUMN_MAPPING["owner_name"] = "G"
+            MEMBER_COLUMN_MAPPING["license_no"] = "D"
+            save_settings()
+            messagebox.showinfo("복원 완료", "기본값(F열: 업소명, G열: 성명, D열: 인허가번호)으로 복원되었습니다.", parent=dlg)
+            dlg.destroy()
+
+        ctk.CTkButton(btn_box, text="💾 매핑 저장", font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"), fg_color="#8B5CF6", hover_color="#7C3AED", command=save_mapping, width=130, height=36).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(btn_box, text="🔄 기본값 복원", font=ctk.CTkFont(family="맑은 고딕", size=12), fg_color="#374151", hover_color="#4B5563", command=reset_mapping, width=130, height=36).pack(side="left")
+        ctk.CTkButton(btn_box, text="취소", font=ctk.CTkFont(family="맑은 고딕", size=12), fg_color="#1F2937", hover_color="#374151", command=dlg.destroy, width=90, height=36).pack(side="right")
+
+    def open_slip_column_settings_dialog(self) -> None:
+        excel_p = self.file_var.get().strip()
+        headers = get_excel_column_headers(excel_p) if excel_p and os.path.isfile(excel_p) else []
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("⚙️ 전표등록 엑셀 컬럼 매핑 설정")
+        dlg.geometry("520x520")
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.grab_set()
+        self._center_dialog(dlg, 520, 520)
+
+        ctk.CTkLabel(
+            dlg,
+            text="⚙️ [전표 자동등록] 엑셀 컬럼 매핑 지정",
+            font=ctk.CTkFont(family="맑은 고딕", size=16, weight="bold"),
+            text_color="#A855F7"
+        ).pack(anchor="w", padx=24, pady=(20, 8))
+
+        if headers:
+            file_name = os.path.basename(excel_p)
+            header_preview = ", ".join([h["display"] for h in headers[:6]])
+            subtitle = f"📄 엑셀 파일: {file_name}\n💡 감지된 최상단 헤더: {header_preview}..."
+        else:
+            subtitle = "💡 엑셀 파일 선택 시 최상단 헤더(1행)가 자동으로 감지 나열됩니다.\n필요한 데이터의 열(A~Z)을 지정하세요."
+
+        ctk.CTkLabel(
+            dlg,
+            text=subtitle,
+            font=ctk.CTkFont(family="맑은 고딕", size=11),
+            text_color="#94A3B8",
+            justify="left"
+        ).pack(anchor="w", padx=24, pady=(0, 16))
+
+        options = [h["display"] for h in headers] if headers else [f"[{chr(65+i)}열] 항목_{i+1}" for i in range(20)]
+
+        def get_default_opt(key_type: str, default_letter: str) -> str:
+            curr = SLIP_COLUMN_MAPPING.get(key_type, default_letter)
+            if headers:
+                for h in headers:
+                    if h["letter"] == curr or curr in h["header"] or h["header"] in curr:
+                        return h["display"]
+                return options[0]
+            else:
+                idx = ord(curr[0].upper()) - 65 if len(curr) == 1 and curr.isalpha() else 0
+                return options[idx] if idx < len(options) else options[0]
+
+        fields = [
+            ("date", "📅 거래일시 컬럼:", "A"),
+            ("type", "📑 전표유형 컬럼:", "F"),
+            ("dir", "🔄 구분 (입/출) 컬럼:", "C"),
+            ("amount", "💵 거래금액 컬럼:", "D"),
+            ("content", "📝 내용 (적요) 컬럼:", "E"),
+        ]
+
+        combos = {}
+        for key_type, label_txt, def_letter in fields:
+            f = ctk.CTkFrame(dlg, fg_color="#18152E", corner_radius=10)
+            f.pack(fill="x", padx=24, pady=4)
+            ctk.CTkLabel(f, text=label_txt, font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"), text_color="#E2E8F0").pack(side="left", padx=12, pady=8)
+            cb = ctk.CTkComboBox(f, values=options, width=220, font=ctk.CTkFont(family="맑은 고딕", size=12), dropdown_font=ctk.CTkFont(family="맑은 고딕", size=11))
+            cb.pack(side="right", padx=12, pady=8)
+            cb.set(get_default_opt(key_type, def_letter))
+            combos[key_type] = cb
+
+        btn_box = ctk.CTkFrame(dlg, fg_color="transparent")
+        btn_box.pack(fill="x", padx=24, pady=(16, 10))
+
+        def parse_letter(val_str: str) -> str:
+            if val_str.startswith("[") and "열]" in val_str:
+                return val_str.split("]")[0].replace("[", "").replace("열", "").strip()
+            return val_str
+
+        def save_mapping():
+            for k in combos:
+                SLIP_COLUMN_MAPPING[k] = parse_letter(combos[k].get())
+            save_settings()
+            messagebox.showinfo("저장 완료", f"✅ 전표등록 엑셀 컬럼 매핑이 저장되었습니다!\n\n• 거래일시: {SLIP_COLUMN_MAPPING['date']}열 | 금액: {SLIP_COLUMN_MAPPING['amount']}열 | 내용: {SLIP_COLUMN_MAPPING['content']}열", parent=dlg)
+            dlg.destroy()
+
+        def reset_mapping():
+            SLIP_COLUMN_MAPPING.update({"date": "A", "type": "F", "dir": "C", "amount": "D", "content": "E"})
+            save_settings()
+            messagebox.showinfo("복원 완료", "기본값(A열: 일시, F열: 유형, C열: 구분, D열: 금액, E열: 내용)으로 복원되었습니다.", parent=dlg)
+            dlg.destroy()
+
+        ctk.CTkButton(btn_box, text="💾 매핑 저장", font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"), fg_color="#8B5CF6", hover_color="#7C3AED", command=save_mapping, width=130, height=36).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(btn_box, text="🔄 기본값 복원", font=ctk.CTkFont(family="맑은 고딕", size=12), fg_color="#374151", hover_color="#4B5563", command=reset_mapping, width=130, height=36).pack(side="left")
+        ctk.CTkButton(btn_box, text="취소", font=ctk.CTkFont(family="맑은 고딕", size=12), fg_color="#1F2937", hover_color="#374151", command=dlg.destroy, width=90, height=36).pack(side="right")
 
     def stop_member_verification(self) -> None:
         if self.is_member_verifying:

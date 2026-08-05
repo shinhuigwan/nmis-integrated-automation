@@ -2715,17 +2715,49 @@ class MemberVerificationResult:
     reason: str
 
 
+def resolve_column_from_letter_or_name(df: pd.DataFrame, custom_val: str | None, default_idx: int) -> str | None:
+    if not custom_val:
+        return None
+
+    custom_val_str = str(custom_val).strip()
+
+    # 1. df.columns에 정확히 일치하는 컬럼명이 있는 경우
+    if custom_val_str in df.columns:
+        return custom_val_str
+
+    # 2. 'F', 'G', 'D' 같은 단일 열 문자 알파벳 기호인 경우
+    if len(custom_val_str) == 1 and custom_val_str.isalpha():
+        col_idx = ord(custom_val_str.upper()) - 65
+        if 0 <= col_idx < len(df.columns):
+            return df.columns[col_idx]
+
+    # 3. 부분 문자열 일치 검사
+    for col in df.columns:
+        col_s = str(col).strip()
+        if custom_val_str in col_s or col_s in custom_val_str:
+            return col
+
+    # 4. 기본 인덱스 반환
+    if 0 <= default_idx < len(df.columns):
+        return df.columns[default_idx]
+
+    return None
+
+
 def verify_member_info_from_nmis(
     target: BrowserContext | Page | object,
     excel_path: str,
     check_license: bool = False,
     status_callback: Callable[[dict], None] | None = None,
     stop_event: threading.Event | None = None,
+    custom_col_store: str | None = None,
+    custom_col_owner: str | None = None,
+    custom_col_license: str | None = None,
 ) -> dict:
     """
     Downloads/일반음식점현황 엑셀 데이터를 읽어 NMIS 회원관리 메뉴에서
     업소명(F열) 및 영업자/대표자(G열), 인허가번호(D열) 일치 여부를 자동 검수하고
-    불일치/미검색 결과를 리턴합니다.
+    불일치/미검색 결과를 리턴합니다. (사용자 맞춤 컬럼 매핑 지원)
     """
     import pandas as pd
 
@@ -2745,31 +2777,31 @@ def verify_member_info_from_nmis(
     except Exception as e:
         raise RuntimeError(f"엑셀 파일 읽기 실패: {e}")
 
-    # 컬럼 인덱스/이름 파악 (F열=5: 업소명, G열=6: 성명/대표자명, D열=3: 인허가번호)
-    col_store = None
-    col_owner = None
-    col_license = None
+    # 맞춤 설정된 컬럼 매핑 분석 (기본값: F열=5: 업소명, G열=6: 대표자, D열=3: 인허가번호)
+    col_store = resolve_column_from_letter_or_name(df, custom_col_store, 5)
+    col_owner = resolve_column_from_letter_or_name(df, custom_col_owner, 6)
+    col_license = resolve_column_from_letter_or_name(df, custom_col_license, 3)
 
-    for col in df.columns:
-        col_str = str(col).strip()
-        # 주소 관련 컬럼 헤더("주소", "지번", "도로명")는 대표자명 매핑 대상에서 명시적 제외
-        if "주소" in col_str or "지번" in col_str or "도로명" in col_str:
-            continue
+    # 미지정 시 자동 헤더 감지 파싱
+    if col_store is None or col_owner is None or col_license is None:
+        for col in df.columns:
+            col_str = str(col).strip()
+            if "주소" in col_str or "지번" in col_str or "도로명" in col_str:
+                continue
 
-        if ("업소명" in col_str or "상호" in col_str) and col_store is None:
-            col_store = col
-        elif ("성명" in col_str or "대표자" in col_str or "영업자" in col_str) and col_owner is None:
-            col_owner = col
-        elif ("인허가" in col_str or "신고" in col_str) and col_license is None:
-            col_license = col
+            if col_store is None and ("업소명" in col_str or "상호" in col_str):
+                col_store = col
+            elif col_owner is None and ("성명" in col_str or "대표자" in col_str or "영업자" in col_str):
+                col_owner = col
+            elif col_license is None and ("인허가" in col_str or "신고" in col_str):
+                col_license = col
 
-    # Fallback to column index if header name not matched
-    if col_store is None and len(df.columns) > 5:
-        col_store = df.columns[5]
-    if col_owner is None and len(df.columns) > 6:
-        col_owner = df.columns[6]
-    if col_license is None and len(df.columns) > 3:
-        col_license = df.columns[3]
+        if col_store is None and len(df.columns) > 5:
+            col_store = df.columns[5]
+        if col_owner is None and len(df.columns) > 6:
+            col_owner = df.columns[6]
+        if col_license is None and len(df.columns) > 3:
+            col_license = df.columns[3]
 
     log(f"매핑된 컬럼 -> 업소명: '{col_store}', 대표자: '{col_owner}', 인허가번호: '{col_license}'")
 
