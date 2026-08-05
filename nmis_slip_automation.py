@@ -2776,27 +2776,17 @@ def verify_member_info_from_nmis(
     not_found_count = 0
     error_count = 0
 
-    # 1. 회원관리 메뉴 이동
+    # 1. 회원관리 메뉴 이동 (master/member/list)
     log("NMIS 회원 > 회원관리 > 회원관리 메뉴 이동 중...")
-    try:
-        # SPA 라우트가 있을 경우 직접 이동 시도
-        current_url = page.url
-        if "#/member/info/list" not in current_url:
-            page.goto("http://nmis.foodservice.or.kr/#/member/info/list", wait_until="networkidle", timeout=10000)
-            page.wait_for_timeout(1500)
-    except Exception:
-        # 메뉴 클릭 시도
-        try:
-            member_menu = page.locator("a:has-text('회원')").first
-            if member_menu.is_visible():
-                member_menu.click()
-                page.wait_for_timeout(500)
-            sub_menu = page.locator("a:has-text('회원관리')").first
-            if sub_menu.is_visible():
-                sub_menu.click()
-                page.wait_for_timeout(1000)
-        except Exception as e:
-            log(f"메뉴 이동 주의: {e}")
+    page.evaluate("""() => {
+        try {
+            var $state = angular.element(document.body).injector().get('$state');
+            if ($state.current.name !== 'master/member/list') {
+                $state.go('master/member/list');
+            }
+        } catch(e) {}
+    }""")
+    page.wait_for_timeout(1500)
 
     # 상호 검색어 입력창 선택자 후보 목록
     search_input_selectors = [
