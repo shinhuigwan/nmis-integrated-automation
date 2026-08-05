@@ -113,6 +113,7 @@ POTENTIAL_COLUMN_MAPPING: dict[str, str] = {
     "mobile": "P",
     "phone": "L",
     "address": "I",
+    "perm_date": "E",
 }
 
 def get_excel_column_headers(file_path: str) -> list[dict]:
@@ -1901,14 +1902,14 @@ class ModernSlipUI(ctk.CTk):
         def select_all_rows():
             for child in self.potential_tree.get_children():
                 vals = list(self.potential_tree.item(child, "values"))
-                vals[0] = "☑️"
+                vals[0] = " ✅ 선택 "
                 self.potential_tree.item(child, values=vals)
             update_selected_count()
 
         def deselect_all_rows():
             for child in self.potential_tree.get_children():
                 vals = list(self.potential_tree.item(child, "values"))
-                vals[0] = "⬜"
+                vals[0] = " ⬜ "
                 self.potential_tree.item(child, values=vals)
             update_selected_count()
 
@@ -1917,12 +1918,12 @@ class ModernSlipUI(ctk.CTk):
             tot_cnt = len(self.potential_tree.get_children())
             for child in self.potential_tree.get_children():
                 vals = self.potential_tree.item(child, "values")
-                if vals and vals[0] == "☑️":
+                if vals and "선택" in vals[0]:
                     sel_cnt += 1
             self.lbl_potential_count.configure(text=f"선택: {sel_cnt}건 / 전체: {tot_cnt}건")
 
-        ctk.CTkButton(tb_bar, text="☑️ 전체 선택", font=ctk.CTkFont(family="맑은 고딕", size=11), fg_color="#374151", width=90, height=28, command=select_all_rows).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(tb_bar, text="⬜ 전체 해제", font=ctk.CTkFont(family="맑은 고딕", size=11), fg_color="#374151", width=90, height=28, command=deselect_all_rows).pack(side="left", padx=(0, 12))
+        ctk.CTkButton(tb_bar, text="☑️ 전체 선택", font=ctk.CTkFont(family="맑은 고딕", size=11, weight="bold"), fg_color="#374151", width=95, height=28, command=select_all_rows).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(tb_bar, text="⬜ 전체 해제", font=ctk.CTkFont(family="맑은 고딕", size=11), fg_color="#374151", width=95, height=28, command=deselect_all_rows).pack(side="left", padx=(0, 12))
 
         self.lbl_potential_count = ctk.CTkLabel(tb_bar, text="선택: 0건 / 전체: 0건", font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"), text_color="#10B981")
         self.lbl_potential_count.pack(side="right")
@@ -1933,26 +1934,28 @@ class ModernSlipUI(ctk.CTk):
         tree_frame.grid_columnconfigure(0, weight=1)
         tree_frame.grid_rowconfigure(0, weight=1)
 
-        cols = ("select", "seq", "store_name", "owner_name", "rrn", "birth_date", "gender", "mobile", "phone", "address")
+        cols = ("select", "seq", "perm_date", "store_name", "owner_name", "rrn", "birth_date", "gender", "mobile", "phone", "address")
         self.potential_tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=12)
 
-        self.potential_tree.heading("select", text="선택")
+        self.potential_tree.heading("select", text="선택 상태")
         self.potential_tree.heading("seq", text="순번")
+        self.potential_tree.heading("perm_date", text="인허가일자(E열)")
         self.potential_tree.heading("store_name", text="업소명(상호)")
         self.potential_tree.heading("owner_name", text="영업자(성명)")
         self.potential_tree.heading("rrn", text="주민등록번호(H열)")
-        self.potential_tree.heading("birth_date", text="생년월일(파싱)")
+        self.potential_tree.heading("birth_date", text="생년월일(8자리)")
         self.potential_tree.heading("gender", text="성별(파싱)")
         self.potential_tree.heading("mobile", text="핸드폰(P열)")
         self.potential_tree.heading("phone", text="소재지전화(L열)")
         self.potential_tree.heading("address", text="소재지주소(I/J열)")
 
-        self.potential_tree.column("select", width=50, anchor="center")
-        self.potential_tree.column("seq", width=50, anchor="center")
+        self.potential_tree.column("select", width=75, anchor="center")
+        self.potential_tree.column("seq", width=45, anchor="center")
+        self.potential_tree.column("perm_date", width=100, anchor="center")
         self.potential_tree.column("store_name", width=110, anchor="w")
         self.potential_tree.column("owner_name", width=80, anchor="center")
         self.potential_tree.column("rrn", width=120, anchor="center")
-        self.potential_tree.column("birth_date", width=90, anchor="center")
+        self.potential_tree.column("birth_date", width=95, anchor="center")
         self.potential_tree.column("gender", width=50, anchor="center")
         self.potential_tree.column("mobile", width=110, anchor="center")
         self.potential_tree.column("phone", width=100, anchor="center")
@@ -1971,7 +1974,7 @@ class ModernSlipUI(ctk.CTk):
             item_id = self.potential_tree.identify_row(event.y)
             if item_id:
                 vals = list(self.potential_tree.item(item_id, "values"))
-                vals[0] = "⬜" if vals[0] == "☑️" else "☑️"
+                vals[0] = " ⬜ " if "선택" in vals[0] else " ✅ 선택 "
                 self.potential_tree.item(item_id, values=vals)
                 update_selected_count()
 
@@ -1986,11 +1989,11 @@ class ModernSlipUI(ctk.CTk):
 
         self.btn_start_potential = ctk.CTkButton(
             f_btns,
-            text="🚀 선택한 행 잠재회원 등록 시작 (1~8단계 작성)",
-            font=ctk.CTkFont(family="맑은 고딕", size=13, weight="bold"),
+            text="🚀 등록 시작",
+            font=ctk.CTkFont(family="맑은 고딕", size=14, weight="bold"),
             fg_color="#8B5CF6",
             hover_color="#7C3AED",
-            width=300,
+            width=150,
             height=40,
             command=self.start_potential_registration
         )
@@ -2031,6 +2034,7 @@ class ModernSlipUI(ctk.CTk):
             for child in self.potential_tree.get_children():
                 self.potential_tree.delete(child)
 
+            col_perm = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("perm_date"), 4)
             col_store = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("store_name"), 5)
             col_owner = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("owner_name"), 6)
             col_rrn = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("rrn"), 7)
@@ -2040,6 +2044,7 @@ class ModernSlipUI(ctk.CTk):
 
             for idx, row in df.iterrows():
                 seq = idx + 1
+                perm_date = str(row[col_perm]).strip() if col_perm and pd.notna(row[col_perm]) else ""
                 store_name = str(row[col_store]).strip() if col_store and pd.notna(row[col_store]) else ""
                 owner_name = str(row[col_owner]).strip() if col_owner and pd.notna(row[col_owner]) else ""
                 rrn = str(row[col_rrn]).strip() if col_rrn and pd.notna(row[col_rrn]) else ""
@@ -2047,15 +2052,19 @@ class ModernSlipUI(ctk.CTk):
                 phone = str(row[col_phone]).strip() if col_phone and pd.notna(row[col_phone]) else ""
                 addr = str(row[col_addr]).strip() if col_addr and pd.notna(row[col_addr]) else ""
 
-                birth_date, gender_code = parse_rrn_birth_gender(rrn)
+                birth_date_8digit, gender_code = parse_rrn_birth_gender(rrn)
                 gender_str = "남" if gender_code == "M" else ("여" if gender_code == "F" else "")
 
-                chk = "☑️" if idx == 0 else "⬜"
+                formatted_mobile = format_korean_phone(mobile)
+                formatted_phone = format_korean_phone(phone)
+                formatted_perm = format_digits_only(perm_date)
+
+                chk = " ✅ 선택 " if idx == 0 else " ⬜ "
 
                 self.potential_tree.insert(
                     "",
                     "end",
-                    values=(chk, seq, store_name, owner_name, rrn, birth_date, gender_str, mobile, phone, addr)
+                    values=(chk, seq, formatted_perm, store_name, owner_name, rrn, birth_date_8digit, gender_str, formatted_mobile, formatted_phone, addr)
                 )
 
             sel_cnt = 1 if len(df) > 0 else 0
@@ -2070,11 +2079,11 @@ class ModernSlipUI(ctk.CTk):
 
         dlg = ctk.CTkToplevel(self)
         dlg.title("⚙️ 잠재회원 엑셀 컬럼 매핑 설정")
-        dlg.geometry("540x560")
+        dlg.geometry("540x600")
         dlg.resizable(False, False)
         dlg.transient(self)
         dlg.grab_set()
-        self._center_dialog(dlg, 540, 560)
+        self._center_dialog(dlg, 540, 600)
 
         ctk.CTkLabel(
             dlg,
@@ -2112,6 +2121,7 @@ class ModernSlipUI(ctk.CTk):
                 return options[idx] if idx < len(options) else options[0]
 
         fields = [
+            ("perm_date", "📅 인허가일자 (적용일자) 컬럼:", "E"),
             ("store_name", "🏢 업소명 (상호명) 컬럼:", "F"),
             ("owner_name", "👤 영업자 성명 컬럼:", "G"),
             ("rrn", "🪪 주민등록번호 컬럼:", "H"),
@@ -2123,10 +2133,10 @@ class ModernSlipUI(ctk.CTk):
         combos = {}
         for key_type, label_txt, def_letter in fields:
             f = ctk.CTkFrame(dlg, fg_color="#18152E", corner_radius=10)
-            f.pack(fill="x", padx=24, pady=4)
-            ctk.CTkLabel(f, text=label_txt, font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"), text_color="#E2E8F0").pack(side="left", padx=12, pady=8)
-            cb = ctk.CTkComboBox(f, values=options, width=220, font=ctk.CTkFont(family="맑은 고딕", size=12), dropdown_font=ctk.CTkFont(family="맑은 고딕", size=11))
-            cb.pack(side="right", padx=12, pady=8)
+            f.pack(fill="x", padx=24, pady=3)
+            ctk.CTkLabel(f, text=label_txt, font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"), text_color="#E2E8F0").pack(side="left", padx=12, pady=6)
+            cb = ctk.CTkComboBox(f, values=options, width=210, font=ctk.CTkFont(family="맑은 고딕", size=12), dropdown_font=ctk.CTkFont(family="맑은 고딕", size=11))
+            cb.pack(side="right", padx=12, pady=6)
             cb.set(get_default_opt(key_type, def_letter))
             combos[key_type] = cb
 
@@ -2142,14 +2152,14 @@ class ModernSlipUI(ctk.CTk):
             for k in combos:
                 POTENTIAL_COLUMN_MAPPING[k] = parse_letter(combos[k].get())
             save_settings()
-            messagebox.showinfo("저장 완료", f"✅ 잠재회원등록 엑셀 컬럼 매핑이 저장되었습니다!\n\n• 영업자: {POTENTIAL_COLUMN_MAPPING['owner_name']}열 | 주민번호: {POTENTIAL_COLUMN_MAPPING['rrn']}열 | 핸드폰: {POTENTIAL_COLUMN_MAPPING['mobile']}열 | 주소: {POTENTIAL_COLUMN_MAPPING['address']}열", parent=dlg)
+            messagebox.showinfo("저장 완료", f"✅ 잠재회원등록 엑셀 컬럼 매핑이 저장되었습니다!\n\n• 인허가일자: {POTENTIAL_COLUMN_MAPPING['perm_date']}열 | 영업자: {POTENTIAL_COLUMN_MAPPING['owner_name']}열 | 주민번호: {POTENTIAL_COLUMN_MAPPING['rrn']}열 | 핸드폰: {POTENTIAL_COLUMN_MAPPING['mobile']}열 | 주소: {POTENTIAL_COLUMN_MAPPING['address']}열", parent=dlg)
             dlg.destroy()
             self.load_potential_excel_rows()
 
         def reset_mapping():
-            POTENTIAL_COLUMN_MAPPING.update({"store_name": "F", "owner_name": "G", "rrn": "H", "mobile": "P", "phone": "L", "address": "I"})
+            POTENTIAL_COLUMN_MAPPING.update({"store_name": "F", "owner_name": "G", "rrn": "H", "mobile": "P", "phone": "L", "address": "I", "perm_date": "E"})
             save_settings()
-            messagebox.showinfo("복원 완료", "기본값(F열: 업소명, G열: 영업자, H열: 주민번호, P열: 핸드폰, L열: 전화, I열: 주소)으로 복원되었습니다.", parent=dlg)
+            messagebox.showinfo("복원 완료", "기본값(E열: 인허가일자, F열: 업소명, G열: 영업자, H열: 주민번호, P열: 핸드폰, L열: 전화, I열: 주소)으로 복원되었습니다.", parent=dlg)
             dlg.destroy()
             self.load_potential_excel_rows()
 
@@ -2161,17 +2171,18 @@ class ModernSlipUI(ctk.CTk):
         selected_rows = []
         for child in self.potential_tree.get_children():
             vals = self.potential_tree.item(child, "values")
-            if vals and vals[0] == "☑️":
+            if vals and "선택" in vals[0]:
                 selected_rows.append({
                     "seq": vals[1],
-                    "store_name": vals[2],
-                    "owner_name": vals[3],
-                    "rrn": vals[4],
-                    "birth_date": vals[5],
-                    "gender": vals[6],
-                    "mobile": vals[7],
-                    "phone": vals[8],
-                    "address": vals[9],
+                    "perm_date": vals[2],
+                    "store_name": vals[3],
+                    "owner_name": vals[4],
+                    "rrn": vals[5],
+                    "birth_date": vals[6],
+                    "gender": vals[7],
+                    "mobile": vals[8],
+                    "phone": vals[9],
+                    "address": vals[10],
                 })
 
         if not selected_rows:

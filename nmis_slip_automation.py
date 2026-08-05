@@ -3043,9 +3043,49 @@ def verify_member_info_from_nmis(
     }
 
 
+def format_digits_only(val: str | int | float) -> str:
+    """숫자 이외의 모든 문자(-, / 등)를 제거하여 숫자만 리턴 (예: 19911018)"""
+    if not val or pd.isna(val):
+        return ""
+    s = str(val).strip()
+    if 'e' in s.lower() or '.' in s:
+        try:
+            s = str(int(float(s)))
+        except Exception:
+            pass
+    clean = re.sub(r'[^0-9]', '', s)
+    return clean[:8]
+
+
+def format_korean_phone(phone_val: str | int | float) -> str:
+    """전화번호 및 핸드폰번호를 010-XXXX-XXXX / 0XX-XXX-XXXX 표준 형식으로 정제"""
+    if not phone_val or pd.isna(phone_val):
+        return ""
+    clean = re.sub(r'[^0-9]', '', str(phone_val).strip())
+    if not clean:
+        return ""
+
+    if len(clean) == 11:
+        return f"{clean[:3]}-{clean[3:7]}-{clean[7:]}"
+    elif len(clean) == 10:
+        if clean.startswith("02"):
+            return f"{clean[:2]}-{clean[2:6]}-{clean[6:]}"
+        else:
+            return f"{clean[:3]}-{clean[3:6]}-{clean[6:]}"
+    elif len(clean) == 9:
+        if clean.startswith("02"):
+            return f"{clean[:2]}-{clean[2:5]}-{clean[5:]}"
+        else:
+            return f"{clean[:3]}-{clean[3:5]}-{clean[5:]}"
+    elif len(clean) == 12:
+        return f"{clean[:4]}-{clean[4:8]}-{clean[8:]}"
+
+    return str(phone_val).strip()
+
+
 def parse_rrn_birth_gender(rrn_val: str | int | float) -> tuple[str, str]:
     """
-    주민등록번호(H열)를 파싱하여 (생년월일 YYYY-MM-DD, 성별 M 또는 F) 반환
+    주민등록번호(H열)를 파싱하여 (생년월일 YYYYMMDD 8자리, 성별 M 또는 F) 반환
     """
     s = str(rrn_val).strip()
     if 'e' in s.lower() or '.' in s:
@@ -3074,9 +3114,9 @@ def parse_rrn_birth_gender(rrn_val: str | int | float) -> tuple[str, str]:
     else:
         yyyy = 1900 + yy if yy > 30 else 2000 + yy
 
-    birth_date = f"{yyyy}-{mm}-{dd}"
+    birth_date_8digit = f"{yyyy}{mm}{dd}"
     gender_code = "M" if g_digit in ('1', '3', '5', '7', '9') else "F"
-    return birth_date, gender_code
+    return birth_date_8digit, gender_code
 
 
 def register_potential_members_on_nmis(
@@ -3138,10 +3178,20 @@ def register_potential_members_on_nmis(
         mobile = row.get("mobile", "")
         phone = row.get("phone", "")
         address = row.get("address", "")
+        perm_date = row.get("perm_date", "")
 
         log(f"\n▶ [{idx+1}/{len(selected_rows)}] '{store_name}' ({owner_name}) 잠재회원 서식 작성 중...")
 
         try:
+            # 1. 적용일자 fromDate (E열 인허가일자 - 숫자 8자리만 입력)
+            perm_date_digits = format_digits_only(perm_date)
+            if perm_date_digits:
+                log(f"  └ [1] 적용일자(fromDate) '{perm_date_digits}' 입력")
+                page.fill("input[name='fromDate']", perm_date_digits)
+                page.dispatch_event("input[name='fromDate']", "input")
+                page.dispatch_event("input[name='fromDate']", "change")
+                page.wait_for_timeout(300)
+
             # 3-1. 잠재회원구분 신규위생교육자 변경
             log("  └ [3-1] 잠재회원구분 '신규위생교육자' 선택")
             try:
@@ -3173,11 +3223,11 @@ def register_potential_members_on_nmis(
                     ok_btn.click(force=True)
                     page.wait_for_timeout(500)
 
-            # 4 & 5. 생년월일 및 성별 (H열 주민번호 파싱)
-            birth_date, gender_code = parse_rrn_birth_gender(rrn)
-            if birth_date:
-                log(f"  └ [4] 생년월일 '{birth_date}' 입력")
-                page.fill("input[name='birthDate']", birth_date)
+            # 4 & 5. 생년월일 (19xxxxxx 8자리) 및 성별 (H열 주민번호 파싱)
+            birth_date_8digit, gender_code = parse_rrn_birth_gender(rrn)
+            if birth_date_8digit:
+                log(f"  └ [4] 생년월일 '{birth_date_8digit}' 입력")
+                page.fill("input[name='birthDate']", birth_date_8digit)
                 page.dispatch_event("input[name='birthDate']", "input")
                 page.dispatch_event("input[name='birthDate']", "change")
                 page.wait_for_timeout(300)
@@ -3191,18 +3241,19 @@ def register_potential_members_on_nmis(
                     page.select_option("select[name='genderType']", value=f"string:{gender_code}")
                 page.wait_for_timeout(300)
 
-            # 6. 핸드폰번호 (P열 -> 없으면 L열 소재지전화번호)
-            final_mobile = mobile if mobile else phone
+            # 6. 핸드폰번호 (P열 -> 없으면 L열 소재지전화번호 / 010-XXXX-XXXX 포맷 정제)
+            final_mobile = format_korean_phone(mobile if mobile else phone)
             if final_mobile:
                 log(f"  └ [6] 핸드폰번호 '{final_mobile}' 입력")
                 page.fill("input[name='mobileNo']", final_mobile)
                 page.dispatch_event("input[name='mobileNo']", "input")
                 page.wait_for_timeout(300)
 
-            # 7. 전화번호 (L열 소재지전화번호)
-            if phone:
-                log(f"  └ [7] 전화번호 '{phone}' 입력")
-                page.fill("input[name='phoneNo']", phone)
+            # 7. 전화번호 (L열 소재지전화번호 / 표준 포맷 정제)
+            final_phone = format_korean_phone(phone)
+            if final_phone:
+                log(f"  └ [7] 전화번호 '{final_phone}' 입력")
+                page.fill("input[name='phoneNo']", final_phone)
                 page.dispatch_event("input[name='phoneNo']", "input")
                 page.wait_for_timeout(300)
 
