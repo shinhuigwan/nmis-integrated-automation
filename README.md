@@ -63,10 +63,10 @@
 
 ## 📦 다운로드 및 설치 방법 (Installation)
 
-### 1. Repository 클론
+### 1. Repository 클론 및 폴더 이동
 ```bash
-git clone https://github.com/shinhuigwan/nmis-slip-automation.git
-cd nmis-slip-automation
+git clone https://github.com/shinhuigwan/nmis-integrated-automation.git "통합 자동화 시스템"
+cd "통합 자동화 시스템"
 ```
 
 ### 2. 가상환경 생성 및 필요 라이브러리 설치
