@@ -41,6 +41,8 @@ from nmis_slip_automation import (
     register_potential_members_on_nmis,
     parse_rrn_birth_gender,
     resolve_column_from_letter_or_name,
+    format_korean_phone,
+    format_digits_only,
 )
 
 def find_chrome() -> Path | None:
