@@ -2778,35 +2778,32 @@ def verify_member_info_from_nmis(
 
     # 1. 회원관리 메뉴 이동 (master/member/list)
     log("NMIS 회원 > 회원관리 > 회원관리 메뉴 이동 중...")
+
+    # (1) 엔트리 메인 화면의 GO 버튼 클릭
+    go_btn = page.locator("button:has-text('GO'), button[ng-click*='fnGoMain']").first
+    if go_btn.count() > 0 and go_btn.is_visible():
+        go_btn.click()
+        page.wait_for_timeout(1500)
+
+    # (2) SPA 라우트로 master/member/list 이동
     page.evaluate("""() => {
         try {
             var $state = angular.element(document.body).injector().get('$state');
-            if ($state.current.name !== 'master/member/list') {
-                $state.go('master/member/list');
-            }
+            $state.go('master/member/list');
         } catch(e) {}
     }""")
-    page.wait_for_timeout(1500)
 
-    # 상호 검색어 입력창 선택자 후보 목록
-    search_input_selectors = [
-        "input[ng-model*='searchWord']",
-        "input[ng-model*='storeName']",
-        "input[ng-model*='businessName']",
-        "input[name='storeName']",
-        "input[placeholder*='상호']",
-        "th:has-text('상호') + td input",
-        "td:has-text('상호') + td input",
-        "tr:has-text('상호') input",
-    ]
-
-    # 조회 버튼 선택자 후보 목록
-    search_btn_selectors = [
-        "span.button_icon[lang-code='search']",
-        "button:has-text('조회')",
-        "a:has-text('조회')",
-        ".btn:has-text('조회')",
-    ]
+    # (3) 회원관리 페이지의 핵심 선택 컨트롤/그리드가 화면에 완전히 나타날 때까지 대기
+    try:
+        page.wait_for_selector(
+            "button:has-text('조회'), button[ng-click*='fnSearch'], epro-grid",
+            state="visible",
+            timeout=10000
+        )
+        page.wait_for_timeout(1000)
+        log("✅ 회원관리 페이지 화면 전체 로딩 완료 확인!")
+    except Exception as e:
+        log(f"⚠️ 페이지 로딩 대기 경고: {e}")
 
     for idx, row in df.iterrows():
         if stop_event and stop_event.is_set():
@@ -2829,144 +2826,91 @@ def verify_member_info_from_nmis(
         web_license = ""
 
         try:
-            # 회원관리 목록 페이지인지 확인 및 복귀
-            if "#/member/info/list" not in page.url:
-                try:
-                    page.goto("http://nmis.foodservice.or.kr/#/member/info/list", timeout=5000)
-                    page.wait_for_timeout(1000)
-                except Exception:
-                    pass
+            # 회원관리 목록 페이지 상태 유지 확인
+            page.evaluate("""() => {
+                try {
+                    var $state = angular.element(document.body).injector().get('$state');
+                    if ($state.current.name !== 'master/member/list') {
+                        $state.go('master/member/list');
+                    }
+                } catch(e) {}
+            }""")
 
-            # 상호 입력창 찾기
-            input_elem = None
-            for sel in search_input_selectors:
-                loc = page.locator(sel).first
-                if loc.is_visible():
-                    input_elem = loc
-                    break
+            # 고속 Scope 검색 및 1차 검색 실행
+            match_rows = page.evaluate("""(name) => {
+                var el = document.querySelector('epro-grid') || document.body;
+                var sc = angular.element(el).scope();
+                if (!sc) return null;
 
-            if not input_elem:
-                # 일반 텍스트 input 중 첫 번째 검색창 시도
-                inputs = page.locator("input[type='text']:visible")
-                if inputs.count() > 0:
-                    input_elem = inputs.first
+                if (sc.searchParams) {
+                    sc.searchParams.ctrlUserName = name;
+                    sc.searchParams.businessName = name;
+                }
+                if (sc.fnSearch) {
+                    sc.fnSearch();
+                }
 
-            if not input_elem:
-                res_status = "오류"
-                res_reason = "상호 검색 입력창을 찾을 수 없음"
-                error_count += 1
+                var list = sc.gridDatamastermemberlist || [];
+                var cleanName = name.replace(/\\s+/g, '');
+                var filtered = list.filter(r => {
+                    var mName = (r.memberName || r.ctrlUserName || '').replace(/\\s+/g, '');
+                    return mName === cleanName || mName.includes(cleanName) || cleanName.includes(mName);
+                });
+
+                return filtered.map(r => ({
+                    memberName: r.memberName || r.ctrlUserName || '',
+                    ceoMemberName: r.ceoMemberName || r.ceoName || '',
+                    businessReportNo: r.businessReportNo || r.govFoodLicenseNo || '',
+                    jibunAddress: r.jibunAddress || '',
+                    doroAddress: r.doroAddress || ''
+                }));
+            }""", store_name)
+
+            if not match_rows or len(match_rows) == 0:
+                page.wait_for_timeout(500)
+                match_rows = page.evaluate("""(name) => {
+                    var el = document.querySelector('epro-grid') || document.body;
+                    var sc = angular.element(el).scope();
+                    var list = sc.gridDatamastermemberlist || [];
+                    var cleanName = name.replace(/\\s+/g, '');
+                    return list.filter(r => {
+                        var mName = (r.memberName || r.ctrlUserName || '').replace(/\\s+/g, '');
+                        return mName === cleanName || mName.includes(cleanName) || cleanName.includes(mName);
+                    }).map(r => ({
+                        memberName: r.memberName || r.ctrlUserName || '',
+                        ceoMemberName: r.ceoMemberName || r.ceoName || '',
+                        businessReportNo: r.businessReportNo || r.govFoodLicenseNo || ''
+                    }));
+                }""", store_name)
+
+            if not match_rows or len(match_rows) == 0:
+                res_status = "미검색"
+                res_reason = "NMIS 상호 검색 결과 0건"
+                not_found_count += 1
             else:
-                input_elem.fill(store_name)
-                page.wait_for_timeout(200)
+                target_matched = None
+                norm_excel_owner = re.sub(r"\s+", "", excel_owner)
 
-                # 조회 버튼 클릭
-                search_btn = None
-                for btn_sel in search_btn_selectors:
-                    b_loc = page.locator(btn_sel).first
-                    if b_loc.is_visible():
-                        search_btn = b_loc
+                for r in match_rows:
+                    w_owner = r.get("ceoMemberName", "").strip()
+                    norm_w_owner = re.sub(r"\s+", "", w_owner)
+                    if norm_excel_owner and (norm_excel_owner == norm_w_owner or norm_excel_owner in norm_w_owner or norm_w_owner in norm_excel_owner):
+                        target_matched = r
                         break
 
-                if search_btn:
-                    search_btn.click()
+                if target_matched:
+                    web_owner = target_matched.get("ceoMemberName", "")
+                    web_license = target_matched.get("businessReportNo", "")
+                    res_status = "일치"
+                    res_reason = "대표자명 일치"
+                    match_count += 1
                 else:
-                    input_elem.press("Enter")
-
-                page.wait_for_timeout(1200)
-
-                # 검색 결과 행 존재 여부 체크
-                # 테이블 행 또는 ui-grid 행 탐색
-                row_locator = page.locator("epro-grid tbody tr, table.grid_table tbody tr, .ui-grid-row").filter(has_text=store_name)
-                if row_locator.count() == 0:
-                    # 전체 행이라도 있는지 확인
-                    row_locator = page.locator("epro-grid tbody tr, table.grid_table tbody tr, .ui-grid-row")
-
-                # 결과 0건 체크 (데이터 없음 메시지 또는 0개)
-                no_data_msg = page.locator("text='조회된 데이터가 없습니다'").first
-                if no_data_msg.is_visible() or row_locator.count() == 0:
-                    res_status = "미검색"
-                    res_reason = "NMIS 상호 검색 결과 0건"
-                    not_found_count += 1
-                else:
-                    # 1행 선택 체크박스 체크 후 수정 버튼 클릭
-                    first_row = row_locator.first
-                    chk_box = first_row.locator("input[type='checkbox']").first
-
-                    if chk_box.is_visible():
-                        if not chk_box.is_checked():
-                            chk_box.check()
-                    else:
-                        # 행 클릭 시도
-                        first_row.click()
-
-                    page.wait_for_timeout(300)
-
-                    # 수정 버튼 클릭
-                    edit_btn = page.locator("span.button_icon[lang-code='update'], button:has-text('수정'), a:has-text('수정')").first
-                    if edit_btn.is_visible():
-                        edit_btn.click()
-                        page.wait_for_timeout(1200)
-
-                        # 대표자 정보 추출 (input or text)
-                        owner_inputs = page.locator("input[ng-model*='ceoName'], input[ng-model*='repName'], input[ng-model*='ownerName'], input[name='repName']")
-                        if owner_inputs.count() > 0 and owner_inputs.first.is_visible():
-                            web_owner = owner_inputs.first.input_value().strip()
-                        else:
-                            # th:has-text('대표자') 인접 td
-                            td_owner = page.locator("th:has-text('대표자') + td, th:has-text('영업자') + td, td:has-text('대표자') + td").first
-                            if td_owner.is_visible():
-                                web_owner = td_owner.text_content().strip()
-
-                        # 신고번호/인허가번호 추출
-                        license_inputs = page.locator("input[ng-model*='reportNo'], input[ng-model*='licenseNo'], input[ng-model*='accNo']")
-                        if license_inputs.count() > 0 and license_inputs.first.is_visible():
-                            web_license = license_inputs.first.input_value().strip()
-                        else:
-                            td_lic = page.locator("th:has-text('신고번호') + td, th:has-text('인허가') + td, td:has-text('신고번호') + td").first
-                            if td_lic.is_visible():
-                                web_license = td_lic.text_content().strip()
-
-                        # 목록 버튼 클릭하여 복귀
-                        list_btn = page.locator("span.button_icon[lang-code='list'], button:has-text('목록'), a:has-text('목록')").first
-                        if list_btn.is_visible():
-                            list_btn.click()
-                            page.wait_for_timeout(800)
-                        else:
-                            page.goto("http://nmis.foodservice.or.kr/#/member/info/list", timeout=5000)
-                            page.wait_for_timeout(800)
-
-                        # 일치 여부 비교
-                        norm_excel_owner = re.sub(r"\s+", "", excel_owner)
-                        norm_web_owner = re.sub(r"\s+", "", web_owner)
-
-                        owner_matched = (norm_excel_owner == norm_web_owner) or (norm_excel_owner in norm_web_owner) or (norm_web_owner in norm_excel_owner)
-
-                        license_matched = True
-                        if check_license:
-                            norm_excel_lic = re.sub(r"[^0-9a-zA-Z]", "", excel_license)
-                            norm_web_lic = re.sub(r"[^0-9a-zA-Z]", "", web_license)
-                            if norm_excel_lic and norm_web_lic:
-                                license_matched = (norm_excel_lic == norm_web_lic) or (norm_excel_lic in norm_web_lic) or (norm_web_lic in norm_excel_lic)
-                            elif norm_excel_lic and not norm_web_lic:
-                                license_matched = False
-
-                        if owner_matched and license_matched:
-                            res_status = "일치"
-                            res_reason = "대표자명 및 인허가/신고번호 일치" if check_license else "대표자명 일치"
-                            match_count += 1
-                        else:
-                            res_status = "불일치"
-                            reasons = []
-                            if not owner_matched:
-                                reasons.append(f"대표자명 불일치 (엑셀: {excel_owner} / 웹: {web_owner})")
-                            if check_license and not license_matched:
-                                reasons.append(f"신고번호 불일치 (엑셀: {excel_license} / 웹: {web_license})")
-                            res_reason = " | ".join(reasons)
-                            mismatch_count += 1
-                    else:
-                        res_status = "오류"
-                        res_reason = "수정 버튼을 찾을 수 없음"
-                        error_count += 1
+                    target_matched = match_rows[0]
+                    web_owner = target_matched.get("ceoMemberName", "")
+                    web_license = target_matched.get("businessReportNo", "")
+                    res_status = "불일치"
+                    res_reason = f"대표자명 불일치 (엑셀: {excel_owner} / 웹: {web_owner})"
+                    mismatch_count += 1
 
         except Exception as ex:
             res_status = "오류"
