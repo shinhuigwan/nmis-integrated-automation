@@ -2745,18 +2745,22 @@ def verify_member_info_from_nmis(
     except Exception as e:
         raise RuntimeError(f"엑셀 파일 읽기 실패: {e}")
 
-    # 컬럼 인덱스/이름 파악 (F열=5: 업소명, G열=6: 영업자, D열=3: 인허가번호)
+    # 컬럼 인덱스/이름 파악 (F열=5: 업소명, G열=6: 성명/대표자명, D열=3: 인허가번호)
     col_store = None
     col_owner = None
     col_license = None
 
     for col in df.columns:
         col_str = str(col).strip()
-        if "업소명" in col_str or "상호" in col_str:
+        # 주소 관련 컬럼 헤더("주소", "지번", "도로명")는 대표자명 매핑 대상에서 명시적 제외
+        if "주소" in col_str or "지번" in col_str or "도로명" in col_str:
+            continue
+
+        if ("업소명" in col_str or "상호" in col_str) and col_store is None:
             col_store = col
-        elif "영업자" in col_str or "대표자" in col_str:
+        elif ("성명" in col_str or "대표자" in col_str or "영업자" in col_str) and col_owner is None:
             col_owner = col
-        elif "인허가번호" in col_str or "신고번호" in col_str:
+        elif ("인허가" in col_str or "신고" in col_str) and col_license is None:
             col_license = col
 
     # Fallback to column index if header name not matched
