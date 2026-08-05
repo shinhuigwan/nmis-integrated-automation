@@ -1393,14 +1393,17 @@ class ModernSlipUI(ctk.CTk):
                         self.is_member_verifying = False
                         self.btn_start_member.configure(state="normal")
                         self.btn_stop_member.configure(state="disabled")
-                        self.lbl_member_status.configure(
-                            text=f"🎉 검수 완결! (일치: {res['match_count']}건, 불일치: {res['mismatch_count']}건, 미검색: {res['not_found_count']}건)",
-                            text_color="#10B981"
-                        )
-                        messagebox.showinfo(
-                            "검수 완료",
-                            f"회원 데이터 검수가 완료되었습니다!\n\n• 전체 검수: {res['total']}건\n• ✅ 일치: {res['match_count']}건\n• ❌ 불일치: {res['mismatch_count']}건\n• 🔍 미검색: {res['not_found_count']}건\n\n[📥 검수 결과 엑셀 저장] 버튼을 눌러 엑셀 파일로 결과를 저장하실 수 있습니다."
-                        )
+
+                        if self.member_stop_event.is_set():
+                            self.lbl_member_status.configure(
+                                text=f"⏹ 검수 중단 완료! (진행 완료: {len(self.member_results_list)}건 - 상단 [엑셀 저장] 버튼으로 저장 가능)",
+                                text_color="#F59E0B"
+                            )
+                        else:
+                            self.lbl_member_status.configure(
+                                text=f"🎉 검수 완료! (전체: {res['total']}건 | ✅ 일치: {res['match_count']}건 | ❌ 불일치: {res['mismatch_count']}건 | 🔍 미검색: {res['not_found_count']}건)",
+                                text_color="#10B981"
+                            )
                     self.after(0, on_complete)
             except Exception as e:
                 err_msg = str(e)
@@ -1409,7 +1412,6 @@ class ModernSlipUI(ctk.CTk):
                     self.btn_start_member.configure(state="normal")
                     self.btn_stop_member.configure(state="disabled")
                     self.lbl_member_status.configure(text=f"❌ 오류 발생: {err_msg[:40]}", text_color="#EF4444")
-                    messagebox.showerror("검수 오류", f"회원 검수 중 오류가 발생했습니다:\n{err_msg}")
                 self.after(0, on_error)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1420,7 +1422,10 @@ class ModernSlipUI(ctk.CTk):
             self.is_member_verifying = False
             self.btn_start_member.configure(state="normal")
             self.btn_stop_member.configure(state="disabled")
-            self.lbl_member_status.configure(text="⏹ 사용자에 의해 중지되었습니다. (현재까지 완료된 건은 엑셀 저장 가능)", text_color="#EF4444")
+            self.lbl_member_status.configure(
+                text=f"⏹ 중지 요청됨... (현재 완료: {len(self.member_results_list)}건 - [엑셀 저장] 가능)",
+                text_color="#EF4444"
+            )
 
     def export_member_results(self) -> None:
         data = []
@@ -1454,38 +1459,27 @@ class ModernSlipUI(ctk.CTk):
                     })
 
         if not data:
-            messagebox.showwarning("저장 경고", "저장할 검수 결과 데이터가 없습니다. 먼저 검수를 진행해 주세요.", parent=self)
+            self.lbl_member_status.configure(text="⚠️ 저장할 검수 결과 데이터가 없습니다. 먼저 검수를 진행해 주세요.", text_color="#EF4444")
             return
 
         desktop_path = Path.home() / "Desktop"
         default_filename = f"NMIS_회원검수결과_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-
-        out_path = filedialog.asksaveasfilename(
-            parent=self,
-            title="검수 결과 엑셀 파일 저장",
-            defaultextension=".xlsx",
-            filetypes=(("Excel 파일", "*.xlsx"), ("모든 파일", "*.*")),
-            initialdir=str(desktop_path),
-            initialfile=default_filename
-        )
-        if not out_path:
-            return
+        out_path = desktop_path / default_filename
 
         try:
             import pandas as pd
             df = pd.DataFrame(data)
             df.to_excel(out_path, index=False)
-            self.log(f"📊 검수 결과 엑셀 저장 완료: {out_path}")
 
-            res = messagebox.askyesno(
-                "저장 완료",
-                f"검수 결과 총 {len(data)}건이 성공적으로 엑셀 파일로 저장되었습니다!\n\n저장 경로: {out_path}\n\n지금 생성된 엑셀 파일을 바로 열어보시겠습니까?",
-                parent=self
-            )
-            if res:
-                os.startfile(out_path)
+            log_msg = f"📊 총 {len(data)}건의 검수 결과가 바탕화면에 저장되었습니다: {default_filename}"
+            self.log(log_msg)
+            self.lbl_member_status.configure(text=f"✅ {log_msg}", text_color="#10B981")
+
+            # 자동으로 생성된 엑셀 파일 바로 열기
+            os.startfile(out_path)
         except Exception as e:
-            messagebox.showerror("저장 실패", f"엑셀 저장 중 오류 발생:\n{e}", parent=self)
+            self.lbl_member_status.configure(text=f"❌ 엑셀 저장 실패: {e}", text_color="#EF4444")
+            self.log(f"엑셀 저장 오류: {e}")
 
 
 
