@@ -2846,7 +2846,7 @@ def verify_member_info_from_nmis(
                 } catch(e) {}
             }""")
 
-            # 3. input[name='memberName'] 입력창에 업소명 입력 후 조회 버튼 클릭
+            # 3. input[name='memberName'] 입력창에 업소명 입력 후 조회 버튼(<span class="button_icon" lang-code="search">조회</span>) 클릭
             input_elem = page.locator("input[name='memberName'], input[ng-model*='memberName']").first
             if not input_elem.count() > 0 or not input_elem.is_visible():
                 input_elem = page.locator("input[ng-model*='businessName'], input[ng-model*='ctrlUserName']").first
@@ -2855,7 +2855,8 @@ def verify_member_info_from_nmis(
                 input_elem.fill(store_name)
                 page.wait_for_timeout(100)
 
-                search_btn = page.locator("button:has-text('조회'), button[ng-click*='fnSearch']").first
+                # 정밀 조회 버튼: <span class="button_icon" lang-code="search">조회</span>
+                search_btn = page.locator("span.button_icon[lang-code='search'], span[lang-code='search']").first
                 if search_btn.count() > 0 and search_btn.is_visible():
                     search_btn.click()
                 else:
@@ -2863,7 +2864,7 @@ def verify_member_info_from_nmis(
 
                 page.wait_for_timeout(1000)
 
-            # 4. [1단계] 그리드 행 체크박스(selected) 체크 & [2단계] 수정 버튼(lang-code="modify") 클릭
+            # 4. [1단계] 그리드 행 체크박스(selected) 체크 & [2단계] 수정 버튼(<span class="button_icon" lang-code="modify">수정</span>) 클릭
             step1_2_res = page.evaluate("""(name) => {
                 var el = document.querySelector('epro-grid') || document.body;
                 var sc = angular.element(el).scope();
@@ -2918,16 +2919,20 @@ def verify_member_info_from_nmis(
                     web_owner = str(web_vals.get("ceoMemberName", "")).strip()
                     web_license = str(web_vals.get("businessReportNo", "")).strip()
 
-                    # [5단계] 목록 버튼(lang-code="list") 클릭하여 목록 페이지 복귀
-                    page.evaluate("""() => {
-                        var sc = angular.element(document.body).scope();
-                        if (sc && sc.fnGo) {
-                            sc.fnGo(sc.getProperty ? sc.getProperty('LIST') : 'LIST');
-                        } else {
-                            var $state = angular.element(document.body).injector().get('$state');
-                            $state.go('master/member/list');
-                        }
-                    }""")
+                    # [5단계] 정밀 목록 버튼(<span class="button_icon" lang-code="list">목록</span>) 클릭하여 목록 페이지 복귀
+                    list_btn = page.locator("span.button_icon[lang-code='list'], span[lang-code='list']").first
+                    if list_btn.count() > 0 and list_btn.is_visible():
+                        list_btn.click()
+                    else:
+                        page.evaluate("""() => {
+                            var sc = angular.element(document.body).scope();
+                            if (sc && sc.fnGo) {
+                                sc.fnGo(sc.getProperty ? sc.getProperty('LIST') : 'LIST');
+                            } else {
+                                var $state = angular.element(document.body).injector().get('$state');
+                                $state.go('master/member/list');
+                            }
+                        }""")
                     page.wait_for_timeout(800)
 
                     # 일치 여부 판정
