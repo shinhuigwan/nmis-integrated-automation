@@ -2840,19 +2840,28 @@ def verify_member_info_from_nmis(
                 } catch(e) {}
             }""")
 
-            # 고속 Scope 검색 및 1차 검색 실행
+            # 1. DOM 입력창(input[name='memberName'])에 업소명 입력 후 조회 버튼 클릭
+            input_elem = page.locator("input[name='memberName'], input[ng-model*='memberName']").first
+            if not input_elem.count() > 0 or not input_elem.is_visible():
+                input_elem = page.locator("input[ng-model*='businessName'], input[ng-model*='ctrlUserName']").first
+
+            if input_elem.count() > 0 and input_elem.is_visible():
+                input_elem.fill(store_name)
+                page.wait_for_timeout(100)
+
+                search_btn = page.locator("button:has-text('조회'), button[ng-click*='fnSearch']").first
+                if search_btn.count() > 0 and search_btn.is_visible():
+                    search_btn.click()
+                else:
+                    input_elem.press("Enter")
+
+                page.wait_for_timeout(1000)
+
+            # 2. Scope 결과 목록 추출 (gridDatamastermemberlist)
             match_rows = page.evaluate("""(name) => {
                 var el = document.querySelector('epro-grid') || document.body;
                 var sc = angular.element(el).scope();
-                if (!sc) return null;
-
-                if (sc.searchParams) {
-                    sc.searchParams.ctrlUserName = name;
-                    sc.searchParams.businessName = name;
-                }
-                if (sc.fnSearch) {
-                    sc.fnSearch();
-                }
+                if (!sc) return [];
 
                 var list = sc.gridDatamastermemberlist || [];
                 var cleanName = name.replace(/\\s+/g, '');
@@ -2860,6 +2869,10 @@ def verify_member_info_from_nmis(
                     var mName = (r.memberName || r.ctrlUserName || '').replace(/\\s+/g, '');
                     return mName === cleanName || mName.includes(cleanName) || cleanName.includes(mName);
                 });
+
+                if (filtered.length === 0 && list.length > 0) {
+                    filtered = list;
+                }
 
                 return filtered.map(r => ({
                     memberName: r.memberName || r.ctrlUserName || '',
@@ -2869,23 +2882,6 @@ def verify_member_info_from_nmis(
                     doroAddress: r.doroAddress || ''
                 }));
             }""", store_name)
-
-            if not match_rows or len(match_rows) == 0:
-                page.wait_for_timeout(500)
-                match_rows = page.evaluate("""(name) => {
-                    var el = document.querySelector('epro-grid') || document.body;
-                    var sc = angular.element(el).scope();
-                    var list = sc.gridDatamastermemberlist || [];
-                    var cleanName = name.replace(/\\s+/g, '');
-                    return list.filter(r => {
-                        var mName = (r.memberName || r.ctrlUserName || '').replace(/\\s+/g, '');
-                        return mName === cleanName || mName.includes(cleanName) || cleanName.includes(mName);
-                    }).map(r => ({
-                        memberName: r.memberName || r.ctrlUserName || '',
-                        ceoMemberName: r.ceoMemberName || r.ceoName || '',
-                        businessReportNo: r.businessReportNo || r.govFoodLicenseNo || ''
-                    }));
-                }""", store_name)
 
             if not match_rows or len(match_rows) == 0:
                 res_status = "미검색"
