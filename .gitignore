@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.idea/
+.vscode/
+_fix_*.py
+tools_debug/
+nmis_slip_ui_backup.py
+settings.json
