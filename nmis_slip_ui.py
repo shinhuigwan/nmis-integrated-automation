@@ -36,9 +36,10 @@ from nmis_slip_automation import (
     fill_monthly_report_from_nmis,
     fill_staff_join_excel_from_data,
     find_nmis_page,
-    read_excel,
     register_ship_documents_on_nmis,
     verify_member_info_from_nmis,
+    register_potential_members_on_nmis,
+    parse_rrn_birth_gender,
 )
 
 def find_chrome() -> Path | None:
@@ -104,6 +105,15 @@ MEMBER_COLUMN_MAPPING: dict[str, str] = {
     "license_no": "D",
 }
 
+POTENTIAL_COLUMN_MAPPING: dict[str, str] = {
+    "store_name": "F",
+    "owner_name": "G",
+    "rrn": "H",
+    "mobile": "P",
+    "phone": "L",
+    "address": "I",
+}
+
 def get_excel_column_headers(file_path: str) -> list[dict]:
     if not file_path or not os.path.exists(file_path):
         return []
@@ -125,7 +135,7 @@ def get_excel_column_headers(file_path: str) -> list[dict]:
         return []
 
 def load_settings() -> None:
-    global KEYWORD_RULES, CONFIRM_SELECTORS, MACRO_STEPS, NMIS_USER_ID, NMIS_PASSWORD, SLIP_COLUMN_MAPPING, MEMBER_COLUMN_MAPPING
+    global KEYWORD_RULES, CONFIRM_SELECTORS, MACRO_STEPS, NMIS_USER_ID, NMIS_PASSWORD, SLIP_COLUMN_MAPPING, MEMBER_COLUMN_MAPPING, POTENTIAL_COLUMN_MAPPING
     if not SETTINGS_FILE.is_file():
         return
     try:
@@ -144,6 +154,8 @@ def load_settings() -> None:
             SLIP_COLUMN_MAPPING.update(data["slip_column_mapping"])
         if "member_column_mapping" in data:
             MEMBER_COLUMN_MAPPING.update(data["member_column_mapping"])
+        if "potential_column_mapping" in data:
+            POTENTIAL_COLUMN_MAPPING.update(data["potential_column_mapping"])
     except Exception as e:
         print(f"설정 로드 실패: {e}")
 
@@ -156,6 +168,7 @@ def save_settings() -> None:
         "nmis_password": NMIS_PASSWORD,
         "slip_column_mapping": SLIP_COLUMN_MAPPING,
         "member_column_mapping": MEMBER_COLUMN_MAPPING,
+        "potential_column_mapping": POTENTIAL_COLUMN_MAPPING,
     }
     try:
         SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -282,6 +295,19 @@ class ModernSlipUI(ctk.CTk):
         )
         self.btn_tab_member.grid(row=3, column=0, padx=16, pady=6, sticky="ew")
 
+        self.btn_tab_potential = ctk.CTkButton(
+            self.sidebar,
+            text="📑 잠재회원 등록",
+            font=ctk.CTkFont(family="맑은 고딕", size=13, weight="bold"),
+            fg_color="transparent",
+            hover_color="#26214A",
+            text_color="#CBD5E1",
+            height=42,
+            corner_radius=10,
+            command=lambda: self._select_tab("potential")
+        )
+        self.btn_tab_potential.grid(row=4, column=0, padx=16, pady=6, sticky="ew")
+
         # Chrome Status Box in Sidebar
         status_box = ctk.CTkFrame(self.sidebar, fg_color="#1E1B3A", corner_radius=12)
         status_box.grid(row=5, column=0, padx=16, pady=16, sticky="ew")
@@ -341,10 +367,12 @@ class ModernSlipUI(ctk.CTk):
         self.tab_monthly_frame = ctk.CTkScrollableFrame(self.main_container, fg_color="transparent")
         self.tab_slip_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
         self.tab_member_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        self.tab_potential_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
 
         self._build_monthly_tab(self.tab_monthly_frame)
         self._build_slip_tab(self.tab_slip_frame)
         self._build_member_tab(self.tab_member_frame)
+        self._build_potential_tab(self.tab_potential_frame)
 
         # 초기 탭 표시 (월보고 자동 연동)
         self._select_tab("monthly")
@@ -356,10 +384,12 @@ class ModernSlipUI(ctk.CTk):
         self.tab_monthly_frame.grid_forget()
         self.tab_slip_frame.grid_forget()
         self.tab_member_frame.grid_forget()
+        self.tab_potential_frame.grid_forget()
 
         self.btn_tab_monthly.configure(fg_color="transparent", text_color="#CBD5E1")
         self.btn_tab_slip.configure(fg_color="transparent", text_color="#CBD5E1")
         self.btn_tab_member.configure(fg_color="transparent", text_color="#CBD5E1")
+        self.btn_tab_potential.configure(fg_color="transparent", text_color="#CBD5E1")
 
         if tab_name == "monthly":
             self.tab_monthly_frame.grid(row=1, column=0, padx=24, pady=10, sticky="nsew")
@@ -373,6 +403,10 @@ class ModernSlipUI(ctk.CTk):
             self.tab_member_frame.grid(row=1, column=0, padx=24, pady=10, sticky="nsew")
             self.btn_tab_member.configure(fg_color="#8B5CF6", text_color="#FFFFFF")
             self.main_title_label.configure(text="👥 회원 정보(대표자/신고번호) 검수 시스템")
+        elif tab_name == "potential":
+            self.tab_potential_frame.grid(row=1, column=0, padx=24, pady=10, sticky="nsew")
+            self.btn_tab_potential.configure(fg_color="#8B5CF6", text_color="#FFFFFF")
+            self.main_title_label.configure(text="📑 잠재회원 등록 시스템 (1~8단계 서식 자동 작성)")
 
     # ── [탭 2] 월보고 자동 연동 뷰 ──────────────────────────────────────────
 
@@ -1780,6 +1814,434 @@ class ModernSlipUI(ctk.CTk):
             messagebox.showerror("저장 오류", f"엑셀 저장 중 오류가 발생했습니다:\n{e}", parent=self)
             self.log(f"❌ 엑셀 저장 실패: {e}")
 
+    # ── [탭 4] 잠재회원 등록 뷰 ──────────────────────────────────────────
+
+    def _build_potential_tab(self, parent: ctk.CTkFrame) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)
+
+        # Card 1: 엑셀 파일 선택 및 컬럼 매핑 설정
+        card1 = ctk.CTkFrame(parent, fg_color="#18152E", border_color="#2E2756", border_width=1, corner_radius=14)
+        card1.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+
+        file_row = ctk.CTkFrame(card1, fg_color="transparent")
+        file_row.pack(fill="x", padx=20, pady=14)
+
+        ctk.CTkLabel(file_row, text="잠재회원 엑셀:", font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"), text_color="#E2E8F0").pack(side="left", padx=(0, 8))
+
+        default_dl_file = Path.home() / "Downloads" / "일반음식점현황(6.30.기준일).xlsx"
+        default_pot_path = str(default_dl_file) if default_dl_file.is_file() else ""
+        self.potential_excel_var = tk.StringVar(value=default_pot_path)
+
+        excel_entry = ctk.CTkEntry(
+            file_row,
+            textvariable=self.potential_excel_var,
+            font=ctk.CTkFont(family="맑은 고딕", size=12),
+            fg_color="#120F24",
+            border_color="#3B326B",
+            corner_radius=8
+        )
+        excel_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        def browse_potential_excel():
+            p = filedialog.askopenfilename(
+                title="일반음식점현황 엑셀 파일 선택",
+                filetypes=(("Excel 파일", "*.xlsx;*.xls"), ("모든 파일", "*.*")),
+            )
+            if p:
+                self.potential_excel_var.set(p)
+                self.load_potential_excel_rows()
+
+        ctk.CTkButton(
+            file_row,
+            text="📁 파일 선택",
+            font=ctk.CTkFont(family="맑은 고딕", size=11),
+            fg_color="#374151",
+            hover_color="#4B5563",
+            width=90,
+            height=32,
+            command=browse_potential_excel
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            file_row,
+            text="📥 엑셀 불러오기",
+            font=ctk.CTkFont(family="맑은 고딕", size=11, weight="bold"),
+            fg_color="#3B82F6",
+            hover_color="#2563EB",
+            width=110,
+            height=32,
+            command=self.load_potential_excel_rows
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            file_row,
+            text="⚙️ 엑셀 컬럼 설정",
+            font=ctk.CTkFont(family="맑은 고딕", size=11, weight="bold"),
+            fg_color="#8B5CF6",
+            hover_color="#7C3AED",
+            width=120,
+            height=32,
+            command=self.open_potential_column_settings_dialog
+        ).pack(side="left")
+
+        # Card 2: 엑셀 행 목록 (Treeview 및 선택 체크 기능)
+        card2 = ctk.CTkFrame(parent, fg_color="#18152E", border_color="#2E2756", border_width=1, corner_radius=14)
+        card2.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
+        card2.grid_columnconfigure(0, weight=1)
+        card2.grid_rowconfigure(1, weight=1)
+
+        # 상단 컨트롤 바 (전체 선택 / 전체 해제 / 선택 건수)
+        tb_bar = ctk.CTkFrame(card2, fg_color="transparent")
+        tb_bar.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 6))
+
+        ctk.CTkLabel(tb_bar, text="📋 잠재회원 대상 행 선택", font=ctk.CTkFont(family="맑은 고딕", size=13, weight="bold"), text_color="#A855F7").pack(side="left", padx=(0, 10))
+
+        def select_all_rows():
+            for child in self.potential_tree.get_children():
+                vals = list(self.potential_tree.item(child, "values"))
+                vals[0] = "☑️"
+                self.potential_tree.item(child, values=vals)
+            update_selected_count()
+
+        def deselect_all_rows():
+            for child in self.potential_tree.get_children():
+                vals = list(self.potential_tree.item(child, "values"))
+                vals[0] = "⬜"
+                self.potential_tree.item(child, values=vals)
+            update_selected_count()
+
+        def update_selected_count():
+            sel_cnt = 0
+            tot_cnt = len(self.potential_tree.get_children())
+            for child in self.potential_tree.get_children():
+                vals = self.potential_tree.item(child, "values")
+                if vals and vals[0] == "☑️":
+                    sel_cnt += 1
+            self.lbl_potential_count.configure(text=f"선택: {sel_cnt}건 / 전체: {tot_cnt}건")
+
+        ctk.CTkButton(tb_bar, text="☑️ 전체 선택", font=ctk.CTkFont(family="맑은 고딕", size=11), fg_color="#374151", width=90, height=28, command=select_all_rows).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(tb_bar, text="⬜ 전체 해제", font=ctk.CTkFont(family="맑은 고딕", size=11), fg_color="#374151", width=90, height=28, command=deselect_all_rows).pack(side="left", padx=(0, 12))
+
+        self.lbl_potential_count = ctk.CTkLabel(tb_bar, text="선택: 0건 / 전체: 0건", font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"), text_color="#10B981")
+        self.lbl_potential_count.pack(side="right")
+
+        # Treeview 테이블
+        tree_frame = ctk.CTkFrame(card2, fg_color="transparent")
+        tree_frame.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 12))
+        tree_frame.grid_columnconfigure(0, weight=1)
+        tree_frame.grid_rowconfigure(0, weight=1)
+
+        cols = ("select", "seq", "store_name", "owner_name", "rrn", "birth_date", "gender", "mobile", "phone", "address")
+        self.potential_tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=12)
+
+        self.potential_tree.heading("select", text="선택")
+        self.potential_tree.heading("seq", text="순번")
+        self.potential_tree.heading("store_name", text="업소명(상호)")
+        self.potential_tree.heading("owner_name", text="영업자(성명)")
+        self.potential_tree.heading("rrn", text="주민등록번호(H열)")
+        self.potential_tree.heading("birth_date", text="생년월일(파싱)")
+        self.potential_tree.heading("gender", text="성별(파싱)")
+        self.potential_tree.heading("mobile", text="핸드폰(P열)")
+        self.potential_tree.heading("phone", text="소재지전화(L열)")
+        self.potential_tree.heading("address", text="소재지주소(I/J열)")
+
+        self.potential_tree.column("select", width=50, anchor="center")
+        self.potential_tree.column("seq", width=50, anchor="center")
+        self.potential_tree.column("store_name", width=110, anchor="w")
+        self.potential_tree.column("owner_name", width=80, anchor="center")
+        self.potential_tree.column("rrn", width=120, anchor="center")
+        self.potential_tree.column("birth_date", width=90, anchor="center")
+        self.potential_tree.column("gender", width=50, anchor="center")
+        self.potential_tree.column("mobile", width=110, anchor="center")
+        self.potential_tree.column("phone", width=100, anchor="center")
+        self.potential_tree.column("address", width=220, anchor="w")
+
+        scroll_y = ttk.Scrollbar(tree_frame, orient="vertical", command=self.potential_tree.yview)
+        scroll_x = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.potential_tree.xview)
+        self.potential_tree.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+
+        self.potential_tree.grid(row=0, column=0, sticky="nsew")
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        scroll_x.grid(row=1, column=0, sticky="ew")
+
+        # 클릭 시 선택/해제 토글
+        def on_tree_click(event):
+            item_id = self.potential_tree.identify_row(event.y)
+            if item_id:
+                vals = list(self.potential_tree.item(item_id, "values"))
+                vals[0] = "⬜" if vals[0] == "☑️" else "☑️"
+                self.potential_tree.item(item_id, values=vals)
+                update_selected_count()
+
+        self.potential_tree.bind("<Button-1>", on_tree_click)
+
+        # Bottom Bar (실행 / 중지 / 상태)
+        b_bar = ctk.CTkFrame(parent, fg_color="#18152E", border_color="#2E2756", border_width=1, corner_radius=14)
+        b_bar.grid(row=2, column=0, sticky="ew")
+
+        f_btns = ctk.CTkFrame(b_bar, fg_color="transparent")
+        f_btns.pack(fill="x", padx=16, pady=12)
+
+        self.btn_start_potential = ctk.CTkButton(
+            f_btns,
+            text="🚀 선택한 행 잠재회원 등록 시작 (1~8단계 작성)",
+            font=ctk.CTkFont(family="맑은 고딕", size=13, weight="bold"),
+            fg_color="#8B5CF6",
+            hover_color="#7C3AED",
+            width=300,
+            height=40,
+            command=self.start_potential_registration
+        )
+        self.btn_start_potential.pack(side="left", padx=(0, 10))
+
+        self.btn_stop_potential = ctk.CTkButton(
+            f_btns,
+            text="⏹ 중지",
+            font=ctk.CTkFont(family="맑은 고딕", size=13, weight="bold"),
+            fg_color="#EF4444",
+            hover_color="#DC2626",
+            state="disabled",
+            width=90,
+            height=40,
+            command=self.stop_potential_registration
+        )
+        self.btn_stop_potential.pack(side="left")
+
+        self.lbl_potential_status = ctk.CTkLabel(
+            f_btns,
+            text="대기 중... (엑셀 파일 선택 후 등록할 행을 체크하고 시작하세요)",
+            font=ctk.CTkFont(family="맑은 고딕", size=12),
+            text_color="#94A3B8"
+        )
+        self.lbl_potential_status.pack(side="right", padx=10)
+
+        # 초기 엑셀 데이터 자동로드
+        if default_pot_path:
+            self.after(500, self.load_potential_excel_rows)
+
+    def load_potential_excel_rows(self) -> None:
+        excel_p = self.potential_excel_var.get().strip()
+        if not excel_p or not os.path.isfile(excel_p):
+            return
+
+        try:
+            df = pd.read_excel(excel_p)
+            for child in self.potential_tree.get_children():
+                self.potential_tree.delete(child)
+
+            col_store = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("store_name"), 5)
+            col_owner = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("owner_name"), 6)
+            col_rrn = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("rrn"), 7)
+            col_mobile = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("mobile"), 15)
+            col_phone = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("phone"), 11)
+            col_addr = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("address"), 8)
+
+            for idx, row in df.iterrows():
+                seq = idx + 1
+                store_name = str(row[col_store]).strip() if col_store and pd.notna(row[col_store]) else ""
+                owner_name = str(row[col_owner]).strip() if col_owner and pd.notna(row[col_owner]) else ""
+                rrn = str(row[col_rrn]).strip() if col_rrn and pd.notna(row[col_rrn]) else ""
+                mobile = str(row[col_mobile]).strip() if col_mobile and pd.notna(row[col_mobile]) else ""
+                phone = str(row[col_phone]).strip() if col_phone and pd.notna(row[col_phone]) else ""
+                addr = str(row[col_addr]).strip() if col_addr and pd.notna(row[col_addr]) else ""
+
+                birth_date, gender_code = parse_rrn_birth_gender(rrn)
+                gender_str = "남" if gender_code == "M" else ("여" if gender_code == "F" else "")
+
+                chk = "☑️" if idx == 0 else "⬜"
+
+                self.potential_tree.insert(
+                    "",
+                    "end",
+                    values=(chk, seq, store_name, owner_name, rrn, birth_date, gender_str, mobile, phone, addr)
+                )
+
+            sel_cnt = 1 if len(df) > 0 else 0
+            self.lbl_potential_count.configure(text=f"선택: {sel_cnt}건 / 전체: {len(df)}건")
+            self.log(f"📑 잠재회원 엑셀 데이터 총 {len(df)}행이 테이블에 로드되었습니다.")
+        except Exception as e:
+            self.log(f"❌ 잠재회원 엑셀 로드 예외: {e}")
+
+    def open_potential_column_settings_dialog(self) -> None:
+        excel_p = self.potential_excel_var.get().strip()
+        headers = get_excel_column_headers(excel_p) if excel_p and os.path.isfile(excel_p) else []
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("⚙️ 잠재회원 엑셀 컬럼 매핑 설정")
+        dlg.geometry("540x560")
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.grab_set()
+        self._center_dialog(dlg, 540, 560)
+
+        ctk.CTkLabel(
+            dlg,
+            text="⚙️ [잠재회원 등록] 엑셀 컬럼 매핑 지정",
+            font=ctk.CTkFont(family="맑은 고딕", size=16, weight="bold"),
+            text_color="#A855F7"
+        ).pack(anchor="w", padx=24, pady=(20, 8))
+
+        if headers:
+            file_name = os.path.basename(excel_p)
+            header_preview = ", ".join([h["display"] for h in headers[:7]])
+            subtitle = f"📄 엑셀 파일: {file_name}\n💡 감지된 헤더: {header_preview}..."
+        else:
+            subtitle = "💡 엑셀 파일 선택 시 최상단 헤더(1행)가 자동으로 나열됩니다.\n필요한 데이터의 열(A~Z)을 지정하세요."
+
+        ctk.CTkLabel(
+            dlg,
+            text=subtitle,
+            font=ctk.CTkFont(family="맑은 고딕", size=11),
+            text_color="#94A3B8",
+            justify="left"
+        ).pack(anchor="w", padx=24, pady=(0, 14))
+
+        options = [h["display"] for h in headers] if headers else [f"[{chr(65+i)}열] 항목_{i+1}" for i in range(20)]
+
+        def get_default_opt(key_type: str, default_letter: str) -> str:
+            curr = POTENTIAL_COLUMN_MAPPING.get(key_type, default_letter)
+            if headers:
+                for h in headers:
+                    if h["letter"] == curr or curr in h["header"] or h["header"] in curr:
+                        return h["display"]
+                return options[0]
+            else:
+                idx = ord(curr[0].upper()) - 65 if len(curr) == 1 and curr.isalpha() else 0
+                return options[idx] if idx < len(options) else options[0]
+
+        fields = [
+            ("store_name", "🏢 업소명 (상호명) 컬럼:", "F"),
+            ("owner_name", "👤 영업자 성명 컬럼:", "G"),
+            ("rrn", "🪪 주민등록번호 컬럼:", "H"),
+            ("mobile", "📱 핸드폰번호 컬럼:", "P"),
+            ("phone", "☎️ 소재지 전화번호 컬럼:", "L"),
+            ("address", "🏠 소재지 주소 컬럼:", "I"),
+        ]
+
+        combos = {}
+        for key_type, label_txt, def_letter in fields:
+            f = ctk.CTkFrame(dlg, fg_color="#18152E", corner_radius=10)
+            f.pack(fill="x", padx=24, pady=4)
+            ctk.CTkLabel(f, text=label_txt, font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"), text_color="#E2E8F0").pack(side="left", padx=12, pady=8)
+            cb = ctk.CTkComboBox(f, values=options, width=220, font=ctk.CTkFont(family="맑은 고딕", size=12), dropdown_font=ctk.CTkFont(family="맑은 고딕", size=11))
+            cb.pack(side="right", padx=12, pady=8)
+            cb.set(get_default_opt(key_type, def_letter))
+            combos[key_type] = cb
+
+        btn_box = ctk.CTkFrame(dlg, fg_color="transparent")
+        btn_box.pack(fill="x", padx=24, pady=(16, 10))
+
+        def parse_letter(val_str: str) -> str:
+            if val_str.startswith("[") and "열]" in val_str:
+                return val_str.split("]")[0].replace("[", "").replace("열", "").strip()
+            return val_str
+
+        def save_mapping():
+            for k in combos:
+                POTENTIAL_COLUMN_MAPPING[k] = parse_letter(combos[k].get())
+            save_settings()
+            messagebox.showinfo("저장 완료", f"✅ 잠재회원등록 엑셀 컬럼 매핑이 저장되었습니다!\n\n• 영업자: {POTENTIAL_COLUMN_MAPPING['owner_name']}열 | 주민번호: {POTENTIAL_COLUMN_MAPPING['rrn']}열 | 핸드폰: {POTENTIAL_COLUMN_MAPPING['mobile']}열 | 주소: {POTENTIAL_COLUMN_MAPPING['address']}열", parent=dlg)
+            dlg.destroy()
+            self.load_potential_excel_rows()
+
+        def reset_mapping():
+            POTENTIAL_COLUMN_MAPPING.update({"store_name": "F", "owner_name": "G", "rrn": "H", "mobile": "P", "phone": "L", "address": "I"})
+            save_settings()
+            messagebox.showinfo("복원 완료", "기본값(F열: 업소명, G열: 영업자, H열: 주민번호, P열: 핸드폰, L열: 전화, I열: 주소)으로 복원되었습니다.", parent=dlg)
+            dlg.destroy()
+            self.load_potential_excel_rows()
+
+        ctk.CTkButton(btn_box, text="💾 매핑 저장", font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"), fg_color="#8B5CF6", hover_color="#7C3AED", command=save_mapping, width=130, height=36).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(btn_box, text="🔄 기본값 복원", font=ctk.CTkFont(family="맑은 고딕", size=12), fg_color="#374151", hover_color="#4B5563", command=reset_mapping, width=130, height=36).pack(side="left")
+        ctk.CTkButton(btn_box, text="취소", font=ctk.CTkFont(family="맑은 고딕", size=12), fg_color="#1F2937", hover_color="#374151", command=dlg.destroy, width=90, height=36).pack(side="right")
+
+    def start_potential_registration(self) -> None:
+        selected_rows = []
+        for child in self.potential_tree.get_children():
+            vals = self.potential_tree.item(child, "values")
+            if vals and vals[0] == "☑️":
+                selected_rows.append({
+                    "seq": vals[1],
+                    "store_name": vals[2],
+                    "owner_name": vals[3],
+                    "rrn": vals[4],
+                    "birth_date": vals[5],
+                    "gender": vals[6],
+                    "mobile": vals[7],
+                    "phone": vals[8],
+                    "address": vals[9],
+                })
+
+        if not selected_rows:
+            messagebox.showwarning("선택 경고", "등록할 잠재회원 행을 목록에서 1개 이상 체크해 주세요.", parent=self)
+            return
+
+        if not cdp_is_ready():
+            messagebox.showerror(
+                "Chrome 미연결",
+                "Chrome이 연동 모드로 열려있지 않습니다.\n\n사이드바의 [🚀 Chrome 연결 열기] 버튼을 누른 후 다시 시도해 주세요.",
+                parent=self
+            )
+            return
+
+        self.is_potential_running = True
+        self.potential_stop_event = threading.Event()
+        self.btn_start_potential.configure(state="disabled")
+        self.btn_stop_potential.configure(state="normal")
+        self.lbl_potential_status.configure(text=f"🚀 선택된 {len(selected_rows)}건 서식 작성 진행 중...", text_color="#A855F7")
+
+        def status_cb(info: dict):
+            t = info.get("type")
+            if t == "log":
+                self.log(info["message"])
+            elif t == "potential_done":
+                self.log(f"  ✅ [{info['seq']}] {info['store_name']} -> {info['status']} ({info['reason']})")
+
+        def worker():
+            try:
+                with sync_playwright() as pw:
+                    browser = pw.chromium.connect_over_cdp(CDP_URL)
+                    res = register_potential_members_on_nmis(
+                        target=browser,
+                        selected_rows=selected_rows,
+                        status_callback=status_cb,
+                        stop_event=self.potential_stop_event,
+                    )
+                    def on_complete():
+                        self.is_potential_running = False
+                        self.btn_start_potential.configure(state="normal")
+                        self.btn_stop_potential.configure(state="disabled")
+
+                        if self.potential_stop_event.is_set():
+                            self.lbl_potential_status.configure(
+                                text=f"⏹ 중단됨! (완료: {res['success']}건)",
+                                text_color="#F59E0B"
+                            )
+                        else:
+                            self.lbl_potential_status.configure(
+                                text=f"🎉 잠재회원 1~8단계 작성 완결! (성공: {res['success']}건 / {res['total']}건) — [등록] 버튼은 미클릭 상태입니다.",
+                                text_color="#10B981"
+                            )
+                    self.after(0, on_complete)
+            except Exception as e:
+                err_msg = str(e)
+                def on_error():
+                    self.is_potential_running = False
+                    self.btn_start_potential.configure(state="normal")
+                    self.btn_stop_potential.configure(state="disabled")
+                    self.lbl_potential_status.configure(text=f"❌ 오류: {err_msg[:40]}", text_color="#EF4444")
+                self.after(0, on_error)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def stop_potential_registration(self) -> None:
+        if hasattr(self, "is_potential_running") and self.is_potential_running:
+            self.potential_stop_event.set()
+            self.is_potential_running = False
+            self.btn_start_potential.configure(state="normal")
+            self.btn_stop_potential.configure(state="disabled")
+            self.lbl_potential_status.configure(text="⏹ 중지 요청됨...", text_color="#EF4444")
 
 
 def main() -> None:

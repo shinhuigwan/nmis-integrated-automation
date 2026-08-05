@@ -3043,6 +3043,222 @@ def verify_member_info_from_nmis(
     }
 
 
+def parse_rrn_birth_gender(rrn_val: str | int | float) -> tuple[str, str]:
+    """
+    주민등록번호(H열)를 파싱하여 (생년월일 YYYY-MM-DD, 성별 M 또는 F) 반환
+    """
+    s = str(rrn_val).strip()
+    if 'e' in s.lower() or '.' in s:
+        try:
+            s = f"{int(float(s)):013d}"
+        except Exception:
+            pass
+
+    clean = re.sub(r'[^0-9]', '', s)
+    if len(clean) < 7:
+        return "", ""
+
+    yymmdd = clean[:6]
+    g_digit = clean[6]
+
+    yy = int(yymmdd[:2])
+    mm = yymmdd[2:4]
+    dd = yymmdd[4:6]
+
+    if g_digit in ('1', '2', '5', '6'):
+        yyyy = 1900 + yy
+    elif g_digit in ('3', '4', '7', '8'):
+        yyyy = 2000 + yy
+    elif g_digit in ('9', '0'):
+        yyyy = 1800 + yy
+    else:
+        yyyy = 1900 + yy if yy > 30 else 2000 + yy
+
+    birth_date = f"{yyyy}-{mm}-{dd}"
+    gender_code = "M" if g_digit in ('1', '3', '5', '7', '9') else "F"
+    return birth_date, gender_code
+
+
+def register_potential_members_on_nmis(
+    target: BrowserContext | Page | object,
+    selected_rows: list[dict],
+    status_callback: Callable[[dict], None] | None = None,
+    stop_event: threading.Event | None = None,
+) -> dict:
+    """
+    NMIS '회원 > 회원관리 > 잠재회원등록' 메뉴로 이동하여
+    선택된 행의 잠재회원 정보(구분, 영업자명, 생년월일, 성별, 핸드폰, 전화, 주소)를 자동 입력합니다.
+    (등록 버튼 클릭 전 단계까지 작성)
+    """
+    def log(msg: str):
+        print(f"[잠재회원] {msg}")
+        if status_callback:
+            status_callback({"type": "log", "message": msg})
+
+    page = find_nmis_page(target)
+    log(f"📌 총 {len(selected_rows)}건의 선택된 잠재회원 자동 등록 작업을 시작합니다.")
+
+    # 1. 잠재회원등록 페이지 이동 (master/member/create)
+    log("NMIS 회원 > 회원관리 > 잠재회원등록 메뉴 이동 중...")
+    go_btn = page.locator("button:has-text('GO'), button[ng-click*='fnGoMain']").first
+    if go_btn.count() > 0 and go_btn.is_visible():
+        go_btn.click()
+        page.wait_for_timeout(1000)
+
+    page.evaluate("""() => {
+        try {
+            var $state = angular.element(document.body).injector().get('$state');
+            $state.go('master/member/create');
+        } catch(e) {}
+    }""")
+
+    try:
+        page.wait_for_selector(
+            "select[name='memberJoinType'], input[name='birthDate']",
+            state="visible",
+            timeout=10000
+        )
+        page.wait_for_timeout(1000)
+        log("✅ 잠재회원등록 페이지 화면 로딩 완료 확인!")
+    except Exception as e:
+        log(f"⚠️ 페이지 로딩 대기 경고: {e}")
+
+    success_count = 0
+    fail_count = 0
+
+    for idx, row in enumerate(selected_rows):
+        if stop_event and stop_event.is_set():
+            log("🛑 사용자에 의해 잠재회원 등록 작업이 중단되었습니다.")
+            break
+
+        seq = row.get("seq", idx + 1)
+        store_name = row.get("store_name", "")
+        owner_name = row.get("owner_name", "")
+        rrn = row.get("rrn", "")
+        mobile = row.get("mobile", "")
+        phone = row.get("phone", "")
+        address = row.get("address", "")
+
+        log(f"\n▶ [{idx+1}/{len(selected_rows)}] '{store_name}' ({owner_name}) 잠재회원 서식 작성 중...")
+
+        try:
+            # 3-1. 잠재회원구분 신규위생교육자 변경
+            log("  └ [3-1] 잠재회원구분 '신규위생교육자' 선택")
+            try:
+                page.select_option("select[name='memberJoinType']", label="신규위생교육자")
+            except Exception:
+                page.select_option("select[name='memberJoinType']", value="string:N")
+            page.wait_for_timeout(300)
+
+            # 3-2. 영업자 이름 지구본 버튼 클릭 -> 입력 -> 확인
+            if owner_name:
+                log(f"  └ [3-2] 영업자 이름 팝업 열기 & '{owner_name}' 입력")
+                page.evaluate("""() => {
+                    var btn = document.querySelector("button[ng-click*='ceoMemberNameFnLang']") || document.querySelector("button img[src*='globe']");
+                    if (btn) {
+                        var target = btn.tagName === 'IMG' ? btn.parentElement : btn;
+                        angular.element(target).triggerHandler('click');
+                    }
+                }""")
+                page.wait_for_timeout(600)
+
+                lang_input = page.locator("input[name*='curLang'], input[ng-model*='curLang']").first
+                if lang_input.count() > 0 and lang_input.is_visible():
+                    lang_input.fill(owner_name)
+                    page.dispatch_event("input[name*='curLang']", "input")
+                    page.wait_for_timeout(300)
+
+                ok_btn = page.locator("span.button_icon[lang-code='ok'], button:has-text('확인')").first
+                if ok_btn.count() > 0 and ok_btn.is_visible():
+                    ok_btn.click(force=True)
+                    page.wait_for_timeout(500)
+
+            # 4 & 5. 생년월일 및 성별 (H열 주민번호 파싱)
+            birth_date, gender_code = parse_rrn_birth_gender(rrn)
+            if birth_date:
+                log(f"  └ [4] 생년월일 '{birth_date}' 입력")
+                page.fill("input[name='birthDate']", birth_date)
+                page.dispatch_event("input[name='birthDate']", "input")
+                page.dispatch_event("input[name='birthDate']", "change")
+                page.wait_for_timeout(300)
+
+            if gender_code:
+                gender_label = "남" if gender_code == "M" else "여"
+                log(f"  └ [5] 성별 '{gender_label}' 선택")
+                try:
+                    page.select_option("select[name='genderType']", label=gender_label)
+                except Exception:
+                    page.select_option("select[name='genderType']", value=f"string:{gender_code}")
+                page.wait_for_timeout(300)
+
+            # 6. 핸드폰번호 (P열 -> 없으면 L열 소재지전화번호)
+            final_mobile = mobile if mobile else phone
+            if final_mobile:
+                log(f"  └ [6] 핸드폰번호 '{final_mobile}' 입력")
+                page.fill("input[name='mobileNo']", final_mobile)
+                page.dispatch_event("input[name='mobileNo']", "input")
+                page.wait_for_timeout(300)
+
+            # 7. 전화번호 (L열 소재지전화번호)
+            if phone:
+                log(f"  └ [7] 전화번호 '{phone}' 입력")
+                page.fill("input[name='phoneNo']", phone)
+                page.dispatch_event("input[name='phoneNo']", "input")
+                page.wait_for_timeout(300)
+
+            # 8. 주소검색 (I열 또는 J열)
+            if address:
+                log(f"  └ [8] 주소검색 팝업 열기 & '{address}' 검색")
+                btn_addr = page.locator("span[lang-code='findAddress'], button:has(span[lang-code='findAddress'])").first
+                if btn_addr.count() > 0:
+                    btn_addr.click(force=True)
+                    page.wait_for_timeout(1000)
+
+                    search_key = page.locator("input[ng-model*='searchKey']:visible").first
+                    if search_key.count() > 0:
+                        search_key.fill(address)
+                        page.dispatch_event("input[ng-model*='searchKey']:visible", "input")
+                        page.wait_for_timeout(300)
+
+                        btn_srch = page.locator("span.button_icon[lang-code='search']:visible").first
+                        if btn_srch.count() > 0:
+                            btn_srch.click(force=True)
+                            page.wait_for_timeout(1200)
+
+                        td_cell = page.locator("td.col-md-5.ng-binding:visible, td.col-md-5:visible").first
+                        if td_cell.count() > 0:
+                            log(f"  └ [8-3] 주소 항목 클릭선택 완료: {td_cell.inner_text()}")
+                            td_cell.click(force=True)
+                            page.wait_for_timeout(800)
+
+            log(f"✅ [{seq}] '{store_name}' 잠재회원 1~8단계 서식 기입 완료! (등록 버튼 클릭 전 단계)")
+            success_count += 1
+
+            if status_callback:
+                status_callback({
+                    "type": "potential_done",
+                    "seq": seq,
+                    "store_name": store_name,
+                    "status": "기입완료",
+                    "reason": "1~8단계 서식 작성 완결 (등록 버튼 클릭 전)"
+                })
+
+        except Exception as e:
+            log(f"❌ [{seq}] '{store_name}' 입력 중 오류: {e}")
+            fail_count += 1
+            if status_callback:
+                status_callback({
+                    "type": "potential_done",
+                    "seq": seq,
+                    "store_name": store_name,
+                    "status": "오류",
+                    "reason": str(e)
+                })
+
+    log(f"\n🎉 잠재회원 서식 입력 작업 완결! (성공: {success_count}건, 실패: {fail_count}건)")
+    return {"total": len(selected_rows), "success": success_count, "fail": fail_count}
+
+
 if __name__ == "__main__":
 
     try:
