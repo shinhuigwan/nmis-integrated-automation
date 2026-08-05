@@ -40,6 +40,7 @@ from nmis_slip_automation import (
     verify_member_info_from_nmis,
     register_potential_members_on_nmis,
     parse_rrn_birth_gender,
+    resolve_column_from_letter_or_name,
 )
 
 def find_chrome() -> Path | None:
