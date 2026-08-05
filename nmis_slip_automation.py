@@ -3045,7 +3045,7 @@ def verify_member_info_from_nmis(
 
 def format_digits_only(val: str | int | float) -> str:
     """숫자 이외의 모든 문자(-, / 등)를 제거하여 숫자만 리턴 (예: 19911018)"""
-    if not val or pd.isna(val):
+    if val is None or str(val).strip() in ("", "nan", "None", "NaT"):
         return ""
     s = str(val).strip()
     if 'e' in s.lower() or '.' in s:
@@ -3059,7 +3059,7 @@ def format_digits_only(val: str | int | float) -> str:
 
 def format_korean_phone(phone_val: str | int | float) -> str:
     """전화번호 및 핸드폰번호를 010-XXXX-XXXX / 0XX-XXX-XXXX 표준 형식으로 정제"""
-    if not phone_val or pd.isna(phone_val):
+    if phone_val is None or str(phone_val).strip() in ("", "nan", "None", "NaT"):
         return ""
     clean = re.sub(r'[^0-9]', '', str(phone_val).strip())
     if not clean:
