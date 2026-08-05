@@ -2830,7 +2830,13 @@ def verify_member_info_from_nmis(
         web_license = ""
 
         try:
-            # 회원관리 목록 페이지 상태 유지 확인
+            # 1. 팝업 모달 자동 닫기
+            page.evaluate("""() => {
+                var closeBtns = document.querySelectorAll('.modal .close, .modal button[ng-click*="close"], .modal button[ng-click*="cancel"]');
+                closeBtns.forEach(b => b.click());
+            }""")
+
+            # 2. 회원관리 목록 페이지(master/member/list) 복귀 및 상태 유지
             page.evaluate("""() => {
                 try {
                     var $state = angular.element(document.body).injector().get('$state');
@@ -2840,7 +2846,7 @@ def verify_member_info_from_nmis(
                 } catch(e) {}
             }""")
 
-            # 1. DOM 입력창(input[name='memberName'])에 업소명 입력 후 조회 버튼 클릭
+            # 3. input[name='memberName'] 입력창에 업소명 입력 후 조회 버튼 클릭
             input_elem = page.locator("input[name='memberName'], input[ng-model*='memberName']").first
             if not input_elem.count() > 0 or not input_elem.is_visible():
                 input_elem = page.locator("input[ng-model*='businessName'], input[ng-model*='ctrlUserName']").first
@@ -2857,60 +2863,106 @@ def verify_member_info_from_nmis(
 
                 page.wait_for_timeout(1000)
 
-            # 2. Scope 결과 목록 추출 (gridDatamastermemberlist)
-            match_rows = page.evaluate("""(name) => {
+            # 4. [1단계] 그리드 행 체크박스(selected) 체크 & [2단계] 수정 버튼(lang-code="modify") 클릭
+            step1_2_res = page.evaluate("""(name) => {
                 var el = document.querySelector('epro-grid') || document.body;
                 var sc = angular.element(el).scope();
-                if (!sc) return [];
+                if (!sc) return { error: "Scope not found" };
 
                 var list = sc.gridDatamastermemberlist || [];
-                var cleanName = name.replace(/\\s+/g, '');
-                var filtered = list.filter(r => {
-                    var mName = (r.memberName || r.ctrlUserName || '').replace(/\\s+/g, '');
-                    return mName === cleanName || mName.includes(cleanName) || cleanName.includes(mName);
-                });
+                if (list.length === 0) return { error: "0건" };
 
-                if (filtered.length === 0 && list.length > 0) {
-                    filtered = list;
+                var cleanName = name.replace(/\\s+/g, '');
+                var targetIdx = 0;
+                for (var i = 0; i < list.length; i++) {
+                    var mName = (list[i].memberName || list[i].ctrlUserName || '').replace(/\\s+/g, '');
+                    if (mName === cleanName || mName.includes(cleanName) || cleanName.includes(mName)) {
+                        targetIdx = i;
+                        break;
+                    }
                 }
 
-                return filtered.map(r => ({
-                    memberName: r.memberName || r.ctrlUserName || '',
-                    ceoMemberName: r.ceoMemberName || r.ceoName || '',
-                    businessReportNo: r.businessReportNo || r.govFoodLicenseNo || '',
-                    jibunAddress: r.jibunAddress || '',
-                    doroAddress: r.doroAddress || ''
-                }));
+                list[targetIdx].selected = "true";
+                if (list[targetIdx].entity) list[targetIdx].entity.selected = "true";
+                if (sc.$apply) sc.$apply();
+
+                if (sc.fnGo) {
+                    sc.fnGo(sc.getProperty ? sc.getProperty('UPDATE') : 'UPDATE');
+                }
+                return { success: true, matchedName: list[targetIdx].memberName };
             }""", store_name)
 
-            if not match_rows or len(match_rows) == 0:
+            if step1_2_res.get("error") == "0건":
                 res_status = "미검색"
                 res_reason = "NMIS 상호 검색 결과 0건"
                 not_found_count += 1
             else:
-                target_matched = None
-                norm_excel_owner = re.sub(r"\s+", "", excel_owner)
+                # [3, 4단계] 상세 수정 페이지 이동 대기 후 대표자명(ceoMemberName) 및 인허가번호(businessReportNo) 추출
+                try:
+                    page.wait_for_selector("input[name='ceoMemberName'], input[ng-model*='ceoMemberName']", state="visible", timeout=8000)
+                    page.wait_for_timeout(300)
 
-                for r in match_rows:
-                    w_owner = r.get("ceoMemberName", "").strip()
-                    norm_w_owner = re.sub(r"\s+", "", w_owner)
-                    if norm_excel_owner and (norm_excel_owner == norm_w_owner or norm_excel_owner in norm_w_owner or norm_w_owner in norm_excel_owner):
-                        target_matched = r
-                        break
+                    web_vals = page.evaluate("""() => {
+                        var inputCeo = document.querySelector("input[name='ceoMemberName']") || document.querySelector("input[ng-model*='ceoMemberName']");
+                        var inputLic = document.querySelector("input[name='businessReportNo']") || document.querySelector("input[ng-model*='businessReportNo']");
 
-                if target_matched:
-                    web_owner = target_matched.get("ceoMemberName", "")
-                    web_license = target_matched.get("businessReportNo", "")
-                    res_status = "일치"
-                    res_reason = "대표자명 일치"
-                    match_count += 1
-                else:
-                    target_matched = match_rows[0]
-                    web_owner = target_matched.get("ceoMemberName", "")
-                    web_license = target_matched.get("businessReportNo", "")
-                    res_status = "불일치"
-                    res_reason = f"대표자명 불일치 (엑셀: {excel_owner} / 웹: {web_owner})"
-                    mismatch_count += 1
+                        var sc = inputCeo ? angular.element(inputCeo).scope() : null;
+                        var datas = sc ? sc.datas : null;
+
+                        return {
+                            ceoMemberName: datas && datas.ceoMemberName ? datas.ceoMemberName : (inputCeo ? inputCeo.value : ''),
+                            businessReportNo: datas && datas.businessReportNo ? datas.businessReportNo : (inputLic ? inputLic.value : '')
+                        };
+                    }""")
+
+                    web_owner = str(web_vals.get("ceoMemberName", "")).strip()
+                    web_license = str(web_vals.get("businessReportNo", "")).strip()
+
+                    # [5단계] 목록 버튼(lang-code="list") 클릭하여 목록 페이지 복귀
+                    page.evaluate("""() => {
+                        var sc = angular.element(document.body).scope();
+                        if (sc && sc.fnGo) {
+                            sc.fnGo(sc.getProperty ? sc.getProperty('LIST') : 'LIST');
+                        } else {
+                            var $state = angular.element(document.body).injector().get('$state');
+                            $state.go('master/member/list');
+                        }
+                    }""")
+                    page.wait_for_timeout(800)
+
+                    # 일치 여부 판정
+                    norm_excel_owner = re.sub(r"\s+", "", excel_owner)
+                    norm_web_owner = re.sub(r"\s+", "", web_owner)
+
+                    owner_matched = (norm_excel_owner == norm_web_owner) or (norm_excel_owner in norm_web_owner) or (norm_web_owner in norm_excel_owner)
+
+                    license_matched = True
+                    if check_license:
+                        norm_excel_lic = re.sub(r"[^0-9a-zA-Z]", "", excel_license)
+                        norm_web_lic = re.sub(r"[^0-9a-zA-Z]", "", web_license)
+                        if norm_excel_lic and norm_web_lic:
+                            license_matched = (norm_excel_lic == norm_web_lic) or (norm_excel_lic in norm_web_lic) or (norm_web_lic in norm_excel_lic)
+                        elif norm_excel_lic and not norm_web_lic:
+                            license_matched = False
+
+                    if owner_matched and license_matched:
+                        res_status = "일치"
+                        res_reason = "대표자명 및 인허가/신고번호 일치" if check_license else "대표자명 일치"
+                        match_count += 1
+                    else:
+                        res_status = "불일치"
+                        reasons = []
+                        if not owner_matched:
+                            reasons.append(f"대표자명 불일치 (엑셀: {excel_owner} / 웹: {web_owner})")
+                        if check_license and not license_matched:
+                            reasons.append(f"신고번호 불일치 (엑셀: {excel_license} / 웹: {web_license})")
+                        res_reason = " | ".join(reasons)
+                        mismatch_count += 1
+
+                except Exception as detail_err:
+                    res_status = "오류"
+                    res_reason = f"상세 페이지 접근 오류: {detail_err}"
+                    error_count += 1
 
         except Exception as ex:
             res_status = "오류"
