@@ -12,6 +12,8 @@ import datetime
 from datetime import date
 from pathlib import Path
 import threading
+import subprocess
+import urllib.request
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
