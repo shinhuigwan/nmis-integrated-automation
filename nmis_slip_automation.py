@@ -3355,16 +3355,112 @@ def register_potential_members_on_nmis(
                             td_cell.click(force=True)
                             page.wait_for_timeout(600)
 
-            # [8] 적용일자 fromDate (E열 인허가일자 - 숫자 8자리만 입력)
-            perm_date_digits = format_digits_only(perm_date)
+            # [Phase 1 제출] 등록 버튼 클릭 -> 1차 확인 팝업 -> 2차 확인 팝업 -> 최종 페이지 이동
+            log("  └ [Phase 1 제출] '등록' 버튼 클릭...")
+            btn_create = page.locator("button:has(span[lang-code='create']), span[lang-code='create']").first
+            if btn_create.count() > 0 and btn_create.is_visible():
+                btn_create.click(force=True)
+                page.wait_for_timeout(800)
+
+                # 1차 확인 팝업
+                log("  └ [Phase 1 제출] 1차 확인 팝업 '확인' 클릭...")
+                ok_btn1 = page.locator("button[ng-click*='fnConfirm']:visible, button[lang-code='ok']:visible, button.btn-success:visible").first
+                if ok_btn1.count() > 0:
+                    ok_btn1.click(force=True)
+                    page.wait_for_timeout(1000)
+
+                # 2차 확인 팝업
+                log("  └ [Phase 1 제출] 2차 확인 팝업 '확인' 클릭...")
+                ok_btn2 = page.locator("button[ng-click*='fnConfirm']:visible, button[lang-code='ok']:visible, button.btn-success:visible").first
+                if ok_btn2.count() > 0:
+                    ok_btn2.click(force=True)
+                    page.wait_for_timeout(1500)
+
+            # [Phase 2 최종 페이지 작성]
+            log("  └ [Phase 2] 이동된 최종 페이지 서식 작성 개시...")
+
+            # Phase 2 - [1] 적용일자 fromDate (E열 인허가일자 - 숫자 8자리만 입력)
             if perm_date_digits:
-                log(f"  └ [8] 적용일자(fromDate) '{perm_date_digits}' 입력")
+                log(f"  └ [Phase 2 - 1] 적용일자(fromDate) '{perm_date_digits}' 입력")
                 page.fill("input[name='fromDate']", perm_date_digits)
                 page.dispatch_event("input[name='fromDate']", "input")
                 page.dispatch_event("input[name='fromDate']", "change")
                 page.wait_for_timeout(200)
 
-            log(f"✅ [{seq}] '{store_name}' 잠재회원 1~8단계 서식 작성 완료! (요청에 따라 8단계까지만 작성 진행)")
+            # Phase 2 - [2] 신고일자 businessReportDate (E열 인허가일자 - 숫자 8자리만 입력)
+            if perm_date_digits:
+                log(f"  └ [Phase 2 - 2] 신고일자(businessReportDate) '{perm_date_digits}' 입력")
+                page.fill("input[name='businessReportDate']", perm_date_digits)
+                page.dispatch_event("input[name='businessReportDate']", "input")
+                page.dispatch_event("input[name='businessReportDate']", "change")
+                page.wait_for_timeout(200)
+
+            # Phase 2 - [3] 상호 memberName (F열 업소명)
+            if store_name:
+                log(f"  └ [Phase 2 - 3] 상호(memberName) '{store_name}' 입력")
+                page.fill("input[name='memberName']", store_name)
+                page.dispatch_event("input[name='memberName']", "input")
+                page.wait_for_timeout(200)
+
+            # Phase 2 - [4] 신고번호 businessReportNo (D열 인허가번호) & 중복체크
+            if license_no:
+                clean_lic = re.sub(r'[^0-9a-zA-Z-]', '', str(license_no).strip())
+                log(f"  └ [Phase 2 - 4] 신고번호(businessReportNo) '{clean_lic}' 입력 & 중복체크")
+                page.fill("input[name='businessReportNo']", clean_lic)
+                page.dispatch_event("input[name='businessReportNo']", "input")
+                page.dispatch_event("input[name='businessReportNo']", "change")
+                page.wait_for_timeout(300)
+
+                dup_btn = page.locator("span[lang-code='duplicateCheck'], button:has(span[lang-code='duplicateCheck']), span:has-text('중복체크')").first
+                if dup_btn.count() > 0 and dup_btn.is_visible():
+                    dup_btn.click(force=True)
+                    page.wait_for_timeout(600)
+
+                    ok_btn = page.locator("button.btn-success:visible, button:has(span[lang-code='ok']):visible, button:has-text('확인'):visible").first
+                    if ok_btn.count() > 0 and ok_btn.is_visible():
+                        ok_btn.click(force=True)
+                        page.wait_for_timeout(400)
+
+            # Phase 2 - [5] 주민번호 registNo (H열 앞6자리 + 뒷1자리 = 총 7자리)
+            regist_7 = parse_rrn_7digit(rrn)
+            if regist_7:
+                log(f"  └ [Phase 2 - 5] 주민번호(registNo) '{regist_7}' (7자리) 입력")
+                page.fill("input[name='registNo']", regist_7)
+                page.dispatch_event("input[name='registNo']", "input")
+                page.wait_for_timeout(200)
+
+            # Phase 2 - [6] 업종 분류 (소분류 / 세분류 / 세세분류)
+            classification = classify_business(business_type=biz_type, business_name=store_name)
+            small_cat = classification.get("smallCategory")
+            detail_cat = classification.get("detailCategory")
+            sub_detail_cat = classification.get("subDetailCategory")
+
+            if small_cat and detail_cat and sub_detail_cat:
+                log(f"  └ [Phase 2 - 6] 업종 분류 선택: {small_cat} -> {detail_cat} -> {sub_detail_cat} (매칭방식: {classification.get('matchedBy')})")
+                ok_small = select_dropdown_by_label(page, "select[name='businessLevel1Code']", small_cat)
+                page.wait_for_timeout(500)
+
+                ok_detail = select_dropdown_by_label(page, "select[name='businessLevel2Code']", detail_cat)
+                page.wait_for_timeout(500)
+
+                ok_sub = select_dropdown_by_label(page, "select[name='businessLevel3Code']", sub_detail_cat)
+                page.wait_for_timeout(400)
+
+                if not (ok_small and ok_detail and ok_sub):
+                    log(f"  ⚠️ [업종분류 경고] 드롭다운 일치 항목 탐색 일부 실패 (소:{ok_small}, 세:{ok_detail}, 세세:{ok_sub})")
+            else:
+                log(f"  ⚠️ [업종분류 검토필요] '{biz_type}' / '{store_name}' -> 사유: {classification.get('reason')}")
+
+            # Phase 2 - [7] 영업장면적 businessReportArea (K열)
+            if area:
+                clean_area = re.sub(r'[^0-9.]', '', str(area).strip())
+                if clean_area:
+                    log(f"  └ [Phase 2 - 7] 영업장면적(businessReportArea) '{clean_area}' 입력")
+                    page.fill("input[name='businessReportArea']", clean_area)
+                    page.dispatch_event("input[name='businessReportArea']", "input")
+                    page.wait_for_timeout(200)
+
+            log(f"✅ [{seq}] '{store_name}' 잠재회원 Phase 1 -> 페이지 이동 -> Phase 2 (1~7단계) 작성 완결! (최종 등록 버튼 미클릭)")
             success_count += 1
 
             if status_callback:
