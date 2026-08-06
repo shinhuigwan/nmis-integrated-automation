@@ -3391,38 +3391,37 @@ def register_potential_members_on_nmis(
             # [7] 주소검색 (I열 또는 J열)
             if address:
                 log(f"  └ [7] 주소검색 팝업 열기 & '{address}' 검색 개시...")
+                try:
+                    # 이전 미닫힘 모달이 남아있다면 닫기 처리
+                    page.evaluate("""() => {
+                        var ms = document.querySelectorAll('.modal');
+                        ms.forEach(m => {
+                            if (m.offsetWidth > 0 && m.offsetHeight > 0) {
+                                var scope = angular.element(m).scope();
+                                if (scope && scope.fnClose) { try { scope.fnClose(); } catch(e){} }
+                            }
+                        });
+                    }""")
+                    page.wait_for_timeout(400)
 
-                # 이전 미닫힘 모달이 남아있다면 닫기 처리
-                page.evaluate("""() => {
-                    var ms = document.querySelectorAll('.modal');
-                    ms.forEach(m => {
-                        if (m.offsetWidth > 0 && m.offsetHeight > 0) {
-                            var scope = angular.element(m).scope();
-                            if (scope && scope.fnClose) scope.fnClose();
+                    # JS triggerHandler로 fnFindZipCode() 직접 호출 (Playwright visibility error 예방)
+                    page.evaluate("""() => {
+                        var btn = document.querySelector("button[ng-click*='fnFindZipCode']") || document.querySelector("span[lang-code='findAddress']");
+                        if (btn) {
+                            var target = btn.tagName === 'SPAN' ? btn.parentElement : btn;
+                            angular.element(target).triggerHandler('click');
                         }
-                    });
-                }""")
-                page.wait_for_timeout(400)
-
-                btn_addr = page.locator("span[lang-code='findAddress'], button:has(span[lang-code='findAddress'])").first
-                if btn_addr.count() > 0:
-                    btn_addr.click(force=True)
+                    }""")
                     page.wait_for_timeout(800)
 
-                    # 주소 검색 팝업의 입력창 대기 (최대 3초)
-                    search_key = None
-                    for _ in range(15):
-                        sk = page.locator("input[ng-model*='searchKey']:visible").first
-                        if sk.count() > 0 and sk.is_visible():
-                            search_key = sk
-                            break
-                        page.wait_for_timeout(200)
-
-                    # 팝업이 안 열렸다면 재클릭 시도
-                    if not search_key:
-                        log("  └ [7] 주소검색 팝업 재클릭 시도...")
-                        btn_addr.click(force=True)
-                        page.wait_for_timeout(1000)
+                    # 주소 검색 팝업의 입력창 대기
+                    search_key = page.locator("input[ng-model*='searchKey']:visible").first
+                    if search_key.count() == 0 or not search_key.is_visible():
+                        log("  └ [7] 주소검색 팝업 버튼 보조 클릭...")
+                        btn_addr = page.locator("button[ng-click*='fnFindZipCode'], span[lang-code='findAddress']").first
+                        if btn_addr.count() > 0:
+                            btn_addr.click(force=True)
+                            page.wait_for_timeout(800)
                         search_key = page.locator("input[ng-model*='searchKey']:visible").first
 
                     if search_key and search_key.count() > 0:
@@ -3457,6 +3456,8 @@ def register_potential_members_on_nmis(
                         page.wait_for_timeout(800)
                     else:
                         log(f"  ⚠️ [7 주소검색 경고] 주소 팝업 입력창을 찾을 수 없어 스킵됨")
+                except Exception as addr_err:
+                    log(f"  ⚠️ [7 주소검색 처리 예외 발생 - 계속 진행]: {addr_err}")
 
             # [Phase 1 - 8] 적용일자 fromDate (E열 인허가일자 - 숫자 8자리만 입력)
             if perm_date_digits:
