@@ -3517,18 +3517,29 @@ def register_potential_members_on_nmis(
             # [Phase 2 최종 페이지 작성]
             log("  └ [Phase 2] 이동된 최종 페이지 서식 작성 개시...")
 
-            # Phase 2 로딩 검증 및 등록>확인>확인 재시도 루프 (최대 2회)
+            # Phase 2 2차 전용 고유 요소(신고일자/신고번호/면적 등) 검증 및 등록>확인>확인 재시도 루프 (최대 2회)
+            p2_loaded = False
             for p2_retry in range(1, 3):
-                inp_p2_from = page.locator("input[name='fromDate']:visible").first
-                if inp_p2_from.count() > 0 and inp_p2_from.is_visible():
+                p2_loaded = page.evaluate("""() => {
+                    var el1 = document.querySelector("input[name='businessReportDate']");
+                    var el2 = document.querySelector("input[name='businessReportNo']");
+                    var el3 = document.querySelector("input[name='businessReportArea']");
+                    var el4 = document.querySelector("input[name='registNoOne']");
+                    var el5 = document.querySelector("button[ng-click*='fnCheckDup']");
+                    var target = el1 || el2 || el3 || el4 || el5;
+                    return target ? (target.offsetWidth > 0 && target.offsetHeight > 0) : false;
+                }""")
+
+                if p2_loaded:
+                    log("  └ [Phase 2 검증 완료] 2차 페이지 전용 고유 서식 요소(신고일자/신고번호/면적) 로드 확인!")
                     break
 
-                log(f"  ⚠️ [Phase 2 로딩 검증] Phase 2-1(fromDate) 입력창 미발견! 등록 ➔ 확인 팝업 재시도 진행 ({p2_retry}/2)...")
+                log(f"  ⚠️ [Phase 2 전용 요소 미발견] 1차 페이지 상태 지속 감지 -> 등록 ➔ 확인 팝업 재시도 진행 ({p2_retry}/2)...")
 
-                # 1. 등록 버튼 재클릭시도
+                # 1. 등록 버튼 재클릭 시도
                 btn_cr = page.locator("button:has(span[lang-code='create']), span[lang-code='create']").first
                 if btn_cr.count() > 0 and btn_cr.is_visible():
-                    log("  └ [재시도] '등록' 버튼 재클릭...")
+                    log("  └ [재시도] 1차 '등록' 버튼 재클릭...")
                     btn_cr.click(force=True)
                     page.wait_for_timeout(800)
 
@@ -3542,7 +3553,7 @@ def register_potential_members_on_nmis(
                     else:
                         break
 
-                page.wait_for_timeout(1200)
+                page.wait_for_timeout(1500)
 
             # Phase 2 - [1] 적용일자 fromDate (E열 인허가일자 - 숫자 8자리만 입력)
             if perm_date_digits:
