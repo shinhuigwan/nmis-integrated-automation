@@ -3399,18 +3399,33 @@ def register_potential_members_on_nmis(
                     if search_key.count() > 0:
                         search_key.fill(address)
                         page.dispatch_event("input[ng-model*='searchKey']:visible", "input")
-                        page.wait_for_timeout(200)
+                        page.wait_for_timeout(300)
 
-                        btn_srch = page.locator("span.button_icon[lang-code='search']:visible").first
+                        btn_srch = page.locator("button:has(span[lang-code='search']):visible, button[ng-click*='fnSearch']:visible, span.button_icon[lang-code='search']:visible").first
                         if btn_srch.count() > 0:
                             btn_srch.click(force=True)
-                            page.wait_for_timeout(1000)
+                            page.wait_for_timeout(1200)
 
-                        td_cell = page.locator("td.col-md-5.ng-binding:visible, td.col-md-5:visible").first
-                        if td_cell.count() > 0:
-                            log(f"  └ [7-3] 주소 항목 클릭선택 완료: {td_cell.inner_text()}")
-                            td_cell.click(force=True)
-                            page.wait_for_timeout(600)
+                        # AngularJS scope.fnSelect(data) 호출을 통해 회사/지회/우편번호/행정동/도로명/지번 바인딩
+                        select_res = page.evaluate("""() => {
+                            var trs = Array.from(document.querySelectorAll('.modal-body tbody tr, .modal-content tbody tr'));
+                            if (trs.length > 0) {
+                                var targetTr = trs[0];
+                                var scope = angular.element(targetTr).scope();
+                                if (scope && scope.fnSelect && scope.data) {
+                                    scope.$apply(function() {
+                                        scope.fnSelect(scope.data);
+                                    });
+                                    return "fnSelect_success";
+                                } else {
+                                    angular.element(targetTr).triggerHandler('click');
+                                    return "triggerHandler_click";
+                                }
+                            }
+                            return "no_trs_found";
+                        }""")
+                        log(f"  └ [7-3] 주소 항목 선택 및 회사/지회/우편번호 스코프 바인딩 완료 ({select_res})")
+                        page.wait_for_timeout(800)
 
             # [Phase 1 - 8] 적용일자 fromDate (E열 인허가일자 - 숫자 8자리만 입력)
             if perm_date_digits:
