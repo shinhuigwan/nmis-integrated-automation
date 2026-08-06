@@ -3412,6 +3412,14 @@ def register_potential_members_on_nmis(
                             td_cell.click(force=True)
                             page.wait_for_timeout(600)
 
+            # [Phase 1 - 8] 적용일자 fromDate (E열 인허가일자 - 숫자 8자리만 입력)
+            if perm_date_digits:
+                log(f"  └ [Phase 1 - 8] 적용일자(fromDate) '{perm_date_digits}' 입력")
+                page.fill("input[name='fromDate']", perm_date_digits)
+                page.dispatch_event("input[name='fromDate']", "input")
+                page.dispatch_event("input[name='fromDate']", "change")
+                page.wait_for_timeout(200)
+
             # [Phase 1 제출] 등록 버튼 클릭 -> 1차 확인 팝업 -> 2차 확인 팝업 -> 최종 페이지 이동
             log("  └ [Phase 1 제출] '등록' 버튼 클릭...")
             btn_create = page.locator("button:has(span[lang-code='create']), span[lang-code='create']").first
