@@ -3341,16 +3341,17 @@ def register_potential_members_on_nmis(
                 }""")
                 page.wait_for_timeout(500)
 
-                lang_input = page.locator("input[name*='curLang'], input[ng-model*='curLang']").first
+                lang_input = page.locator("input[name*='curLang']:visible, input[ng-model*='curLang']:visible").first
                 if lang_input.count() > 0 and lang_input.is_visible():
                     lang_input.fill(owner_name)
-                    page.dispatch_event("input[name*='curLang']", "input")
-                    page.wait_for_timeout(200)
+                    page.dispatch_event("input[name*='curLang']:visible", "input")
+                    page.wait_for_timeout(300)
 
-                ok_btn = page.locator("span.button_icon[lang-code='ok'], button:has-text('확인')").first
+                # 지구본 팝업의 확인 버튼은 button[ng-click*='fnGo'] 입니다!
+                ok_btn = page.locator("button[ng-click*='fnGo']:visible, button:has(span[lang-code='ok']):visible, button:has-text('확인'):visible").first
                 if ok_btn.count() > 0 and ok_btn.is_visible():
                     ok_btn.click(force=True)
-                    page.wait_for_timeout(400)
+                    page.wait_for_timeout(600)
 
             # [3] 생년월일 (H열 주민번호 파싱 YYYYMMDD 8자리)
             birth_date_8digit, gender_code = parse_rrn_birth_gender(rrn)
