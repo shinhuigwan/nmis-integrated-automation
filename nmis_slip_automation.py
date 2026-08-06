@@ -3120,6 +3120,103 @@ def parse_rrn_birth_gender(rrn_val: str | int | float) -> tuple[str, str]:
     return birth_date_8digit, gender_code
 
 
+def navigate_to_nmis_potential_member_page(page: Page, log_func: Callable[[str], None] | None = None) -> bool:
+    """
+    NMIS '회원 > 회원관리 > 잠재회원등록' (master/member/create) 페이지로 100% 확실히 이동합니다.
+    """
+    def _log(msg: str):
+        print(f"[페이지이동] {msg}")
+        if log_func:
+            log_func(msg)
+
+    # 1. 이미 이동해 있는지 체크
+    try:
+        if "master/member/create" in page.url and page.locator("select[name='memberJoinType'], input[name='birthDate']").count() > 0:
+            _log("✅ 이미 잠재회원등록 페이지에 접속되어 있습니다.")
+            return True
+    except Exception:
+        pass
+
+    _log("📌 NMIS 회원 > 회원관리 > 잠재회원등록 페이지 이동을 시작합니다.")
+
+    # 2. 다중 스코프 대상 AngularJS $state.go('master/member/create') 시도
+    for attempt in range(2):
+        try:
+            state_res = page.evaluate("""() => {
+                var targets = [
+                    document.querySelector('[ng-app]'),
+                    document.querySelector('.ng-scope'),
+                    document.body,
+                    document.documentElement,
+                    document.querySelector('#wrap'),
+                    document.querySelector('#container')
+                ];
+                for (var i = 0; i < targets.length; i++) {
+                    var el = targets[i];
+                    if (el && window.angular) {
+                        try {
+                            var inj = angular.element(el).injector();
+                            if (inj && inj.has('$state')) {
+                                inj.get('$state').go('master/member/create');
+                                return true;
+                            }
+                        } catch(e) {}
+                    }
+                }
+                return false;
+            }""")
+            page.wait_for_timeout(1000)
+
+            if page.locator("select[name='memberJoinType'], input[name='birthDate']").count() > 0:
+                _log("✅ AngularJS 상태 제어($state.go)를 통해 잠재회원등록 화면 이동 성공!")
+                return True
+        except Exception:
+            pass
+
+    # 3. Hash 주소 지정 fallback
+    _log("🔄 location.hash = '#/master/member/create' 이동 시도...")
+    try:
+        page.evaluate("location.hash = '#/master/member/create'")
+        page.wait_for_timeout(1200)
+        if page.locator("select[name='memberJoinType'], input[name='birthDate']").count() > 0:
+            _log("✅ location.hash 지정을 통해 잠재회원등록 화면 이동 성공!")
+            return True
+    except Exception:
+        pass
+
+    # 4. DOM 메뉴 직접 탐색/클릭 fallback
+    _log("🔄 DOM 메뉴 직접 클릭 이동 시도...")
+    try:
+        page.evaluate("""() => {
+            var elems = Array.from(document.querySelectorAll('a, span, li, button'));
+            var target = elems.find(el => (el.textContent || '').trim() === '잠재회원등록' || (el.getAttribute('ui-sref') || '').includes('master/member/create'));
+            if (target) {
+                target.click();
+                return true;
+            }
+            return false;
+        }""")
+        page.wait_for_timeout(1500)
+        if page.locator("select[name='memberJoinType'], input[name='birthDate']").count() > 0:
+            _log("✅ DOM 메뉴 직접 클릭을 통해 잠재회원등록 화면 이동 성공!")
+            return True
+    except Exception:
+        pass
+
+    # 5. 최종 대기
+    try:
+        page.wait_for_selector(
+            "select[name='memberJoinType'], input[name='birthDate']",
+            state="visible",
+            timeout=5000
+        )
+        _log("✅ 잠재회원등록 화면 로딩 확인 완료!")
+        return True
+    except Exception as e:
+        _log(f"⚠️ 잠재회원등록 화면 이동 확인 실패: {e}")
+        return False
+
+
 def register_potential_members_on_nmis(
     target: BrowserContext | Page | object,
     selected_rows: list[dict],
@@ -3140,29 +3237,9 @@ def register_potential_members_on_nmis(
     log(f"📌 총 {len(selected_rows)}건의 선택된 잠재회원 자동 등록 작업을 시작합니다.")
 
     # 1. 잠재회원등록 페이지 이동 (master/member/create)
-    log("NMIS 회원 > 회원관리 > 잠재회원등록 메뉴 이동 중...")
-    go_btn = page.locator("button:has-text('GO'), button[ng-click*='fnGoMain']").first
-    if go_btn.count() > 0 and go_btn.is_visible():
-        go_btn.click()
-        page.wait_for_timeout(1000)
-
-    page.evaluate("""() => {
-        try {
-            var $state = angular.element(document.body).injector().get('$state');
-            $state.go('master/member/create');
-        } catch(e) {}
-    }""")
-
-    try:
-        page.wait_for_selector(
-            "select[name='memberJoinType'], input[name='birthDate']",
-            state="visible",
-            timeout=10000
-        )
-        page.wait_for_timeout(1000)
-        log("✅ 잠재회원등록 페이지 화면 로딩 완료 확인!")
-    except Exception as e:
-        log(f"⚠️ 페이지 로딩 대기 경고: {e}")
+    nav_ok = navigate_to_nmis_potential_member_page(page, log)
+    if not nav_ok:
+        log("⚠️ 잠재회원등록 화면 이동 실패 - 화면 상태 확인 필요")
 
     success_count = 0
     fail_count = 0
