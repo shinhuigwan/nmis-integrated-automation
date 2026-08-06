@@ -1942,29 +1942,34 @@ class ModernSlipUI(ctk.CTk):
         cols = ("select", "seq", "perm_date", "store_name", "owner_name", "rrn", "birth_date", "gender", "mobile", "phone", "address")
         self.potential_tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=12)
 
-        self.potential_tree.heading("select", text="선택 상태")
-        self.potential_tree.heading("seq", text="순번")
-        self.potential_tree.heading("perm_date", text="인허가일자(E열)")
-        self.potential_tree.heading("store_name", text="업소명(상호)")
-        self.potential_tree.heading("owner_name", text="영업자(성명)")
-        self.potential_tree.heading("rrn", text="주민등록번호(H열)")
-        self.potential_tree.heading("birth_date", text="생년월일(8자리)")
-        self.potential_tree.heading("gender", text="성별(파싱)")
-        self.potential_tree.heading("mobile", text="핸드폰(P열)")
-        self.potential_tree.heading("phone", text="소재지전화(L열)")
-        self.potential_tree.heading("address", text="소재지주소(I/J열)")
+        headings_map = [
+            ("select", "선택 상태"),
+            ("seq", "순번"),
+            ("perm_date", "인허가일자(E열)"),
+            ("store_name", "업소명(상호)"),
+            ("owner_name", "영업자(성명)"),
+            ("rrn", "주민등록번호(H열)"),
+            ("birth_date", "생년월일(8자리)"),
+            ("gender", "성별(파싱)"),
+            ("mobile", "핸드폰(P열)"),
+            ("phone", "소재지전화(L열)"),
+            ("address", "소재지주소(I/J열)"),
+        ]
 
-        self.potential_tree.column("select", width=75, anchor="center")
-        self.potential_tree.column("seq", width=45, anchor="center")
-        self.potential_tree.column("perm_date", width=100, anchor="center")
-        self.potential_tree.column("store_name", width=110, anchor="w")
-        self.potential_tree.column("owner_name", width=80, anchor="center")
-        self.potential_tree.column("rrn", width=120, anchor="center")
-        self.potential_tree.column("birth_date", width=95, anchor="center")
-        self.potential_tree.column("gender", width=50, anchor="center")
-        self.potential_tree.column("mobile", width=110, anchor="center")
-        self.potential_tree.column("phone", width=100, anchor="center")
-        self.potential_tree.column("address", width=220, anchor="w")
+        for col_id, title in headings_map:
+            self.potential_tree.heading(col_id, text=title, command=lambda c=col_id: self.sort_potential_tree_by_column(c))
+
+        self.potential_tree.column("select", width=80, anchor="center")
+        self.potential_tree.column("seq", width=65, anchor="center")
+        self.potential_tree.column("perm_date", width=110, anchor="center")
+        self.potential_tree.column("store_name", width=140, anchor="w")
+        self.potential_tree.column("owner_name", width=90, anchor="center")
+        self.potential_tree.column("rrn", width=125, anchor="center")
+        self.potential_tree.column("birth_date", width=100, anchor="center")
+        self.potential_tree.column("gender", width=60, anchor="center")
+        self.potential_tree.column("mobile", width=115, anchor="center")
+        self.potential_tree.column("phone", width=110, anchor="center")
+        self.potential_tree.column("address", width=380, minwidth=250, stretch=True, anchor="w")
 
         scroll_y = ttk.Scrollbar(tree_frame, orient="vertical", command=self.potential_tree.yview)
         scroll_x = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.potential_tree.xview)
@@ -1974,8 +1979,11 @@ class ModernSlipUI(ctk.CTk):
         scroll_y.grid(row=0, column=1, sticky="ns")
         scroll_x.grid(row=1, column=0, sticky="ew")
 
-        # 클릭 시 선택/해제 토글
+        # 셀 클릭 시에만 선택/해제 토글 (헤더 클릭시에는 정렬 실행)
         def on_tree_click(event):
+            region = self.potential_tree.identify_region(event.x, event.y)
+            if region not in ("cell", "tree"):
+                return
             item_id = self.potential_tree.identify_row(event.y)
             if item_id:
                 vals = list(self.potential_tree.item(item_id, "values"))
@@ -2101,6 +2109,64 @@ class ModernSlipUI(ctk.CTk):
             self.log(f"📑 잠재회원 엑셀 데이터 총 {len(df)}행이 테이블에 로드되었습니다.")
         except Exception as e:
             self.log(f"❌ 잠재회원 엑셀 로드 예외: {e}")
+
+    def sort_potential_tree_by_column(self, col_name: str) -> None:
+        """
+        잠재회원 테이블의 컬럼 헤더 클릭 시 오름차순/내림차순 정렬 (순번 등 숫자 열 숫자순 정렬 지원)
+        """
+        if not hasattr(self, "_potential_sort_state"):
+            self._potential_sort_state = {}
+
+        reverse = not self._potential_sort_state.get(col_name, False)
+        self._potential_sort_state[col_name] = reverse
+
+        cols = ("select", "seq", "perm_date", "store_name", "owner_name", "rrn", "birth_date", "gender", "mobile", "phone", "address")
+        if col_name not in cols:
+            return
+        col_idx = cols.index(col_name)
+
+        children = self.potential_tree.get_children("")
+        items_data = []
+
+        for item_id in children:
+            vals = self.potential_tree.item(item_id, "values")
+            val = vals[col_idx] if len(vals) > col_idx else ""
+
+            if col_name == "seq":
+                try:
+                    sort_key = int(val)
+                except ValueError:
+                    sort_key = 0
+            else:
+                sort_key = str(val).lower()
+
+            items_data.append((sort_key, item_id))
+
+        items_data.sort(key=lambda x: x[0], reverse=reverse)
+
+        for index, (_, item_id) in enumerate(items_data):
+            self.potential_tree.move(item_id, "", index)
+
+        headings = {
+            "select": "선택 상태",
+            "seq": "순번",
+            "perm_date": "인허가일자(E열)",
+            "store_name": "업소명(상호)",
+            "owner_name": "영업자(성명)",
+            "rrn": "주민등록번호(H열)",
+            "birth_date": "생년월일(8자리)",
+            "gender": "성별(파싱)",
+            "mobile": "핸드폰(P열)",
+            "phone": "소재지전화(L열)",
+            "address": "소재지주소(I/J열)"
+        }
+
+        for c, base_title in headings.items():
+            if c == col_name:
+                arrow = " ▼" if reverse else " ▲"
+                self.potential_tree.heading(c, text=base_title + arrow, command=lambda _c=c: self.sort_potential_tree_by_column(_c))
+            else:
+                self.potential_tree.heading(c, text=base_title, command=lambda _c=c: self.sort_potential_tree_by_column(_c))
 
     def open_potential_column_settings_dialog(self) -> None:
         excel_p = self.potential_excel_var.get().strip()
