@@ -3466,26 +3466,27 @@ def register_potential_members_on_nmis(
                 page.dispatch_event("input[name='fromDate']", "change")
                 page.wait_for_timeout(200)
 
-            # [Phase 1 제출] 등록 버튼 클릭 -> 1차 확인 팝업 -> 2차 확인 팝업 -> 최종 페이지 이동
+            # [Phase 1 제출] 등록 버튼 클릭 -> 최대 2회 확인 팝업 승인 -> 최종 페이지 이동
             log("  └ [Phase 1 제출] '등록' 버튼 클릭...")
             btn_create = page.locator("button:has(span[lang-code='create']), span[lang-code='create']").first
             if btn_create.count() > 0 and btn_create.is_visible():
                 btn_create.click(force=True)
                 page.wait_for_timeout(800)
 
-                # 1차 확인 팝업
-                log("  └ [Phase 1 제출] 1차 확인 팝업 '확인' 클릭...")
-                ok_btn1 = page.locator("button[ng-click*='fnConfirm']:visible, button[lang-code='ok']:visible, button.btn-success:visible").first
-                if ok_btn1.count() > 0:
-                    ok_btn1.click(force=True)
-                    page.wait_for_timeout(1000)
-
-                # 2차 확인 팝업
-                log("  └ [Phase 1 제출] 2차 확인 팝업 '확인' 클릭...")
-                ok_btn2 = page.locator("button[ng-click*='fnConfirm']:visible, button[lang-code='ok']:visible, button.btn-success:visible").first
-                if ok_btn2.count() > 0:
-                    ok_btn2.click(force=True)
-                    page.wait_for_timeout(1500)
+                # 최대 2회의 확인 팝업 연속 승인 처리
+                for popup_idx in range(1, 3):
+                    ok_btn = page.locator("button[ng-click*='fnConfirm']:visible, button[lang-code='ok']:visible, button.btn-success:visible, button:has-text('확인'):visible").first
+                    if ok_btn.count() > 0 and ok_btn.is_visible():
+                        log(f"  └ [Phase 1 제출] {popup_idx}차 확인 팝업 '확인' 클릭 완료")
+                        ok_btn.click(force=True)
+                        page.wait_for_timeout(1200)
+                    else:
+                        page.wait_for_timeout(500)
+                        ok_btn_retry = page.locator("button[ng-click*='fnConfirm']:visible, button[lang-code='ok']:visible, button.btn-success:visible, button:has-text('확인'):visible").first
+                        if ok_btn_retry.count() > 0 and ok_btn_retry.is_visible():
+                            log(f"  └ [Phase 1 제출] {popup_idx}차 확인 팝업 '확인' 재시도 클릭 완료")
+                            ok_btn_retry.click(force=True)
+                            page.wait_for_timeout(1200)
 
             # [Phase 2 최종 페이지 작성]
             log("  └ [Phase 2] 이동된 최종 페이지 서식 작성 개시...")
