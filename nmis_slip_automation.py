@@ -3133,6 +3133,48 @@ def parse_rrn_7digit(rrn_val: str) -> str:
     return clean
 
 
+def select_dropdown_by_label(page: Page, select_selector: str, target_text: str, timeout_ms: int = 4000) -> bool:
+    """
+    AngularJS select 드롭다운에서 지정한 label/표시 텍스트와 일치하는 option 요소를 동적으로 탐색하여 선택하고
+    change/input 이벤트를 발행합니다.
+    """
+    if not target_text:
+        return False
+    target_clean = target_text.strip().replace(" ", "")
+    start_time = time.time()
+
+    while (time.time() - start_time) * 1000 < timeout_ms:
+        try:
+            sel = page.locator(select_selector).first
+            if sel.count() > 0 and sel.is_visible():
+                opt_info = page.evaluate("""(selector) => {
+                    var select = document.querySelector(selector);
+                    if (!select) return null;
+                    var opts = Array.from(select.options);
+                    return opts.map(o => ({
+                        value: o.value,
+                        text: (o.text || '').trim(),
+                        label: (o.getAttribute('label') || o.text || '').trim()
+                    }));
+                }""", select_selector)
+
+                if opt_info:
+                    for opt in opt_info:
+                        txt = opt['text'].replace(" ", "")
+                        lbl = opt['label'].replace(" ", "")
+                        if target_clean in txt or target_clean in lbl or txt in target_clean or lbl in target_clean:
+                            val = opt['value']
+                            sel.select_option(value=val)
+                            page.dispatch_event(select_selector, "change")
+                            page.dispatch_event(select_selector, "input")
+                            return True
+        except Exception:
+            pass
+        page.wait_for_timeout(200)
+
+    return False
+
+
 def navigate_to_nmis_potential_member_page(page: Page, log_func: Callable[[str], None] | None = None) -> bool:
     """
     NMIS '회원 > 회원관리 > 잠재회원등록' (master/member/create) 페이지로 100% 확실히 이동합니다.
