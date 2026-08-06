@@ -109,13 +109,16 @@ MEMBER_COLUMN_MAPPING: dict[str, str] = {
 }
 
 POTENTIAL_COLUMN_MAPPING: dict[str, str] = {
+    "biz_type": "C",
+    "license_no": "D",
+    "perm_date": "E",
     "store_name": "F",
     "owner_name": "G",
     "rrn": "H",
-    "mobile": "P",
-    "phone": "L",
     "address": "I",
-    "perm_date": "E",
+    "area": "K",
+    "phone": "L",
+    "mobile": "P",
 }
 
 def get_excel_column_headers(file_path: str) -> list[dict]:
@@ -2036,23 +2039,31 @@ class ModernSlipUI(ctk.CTk):
             for child in self.potential_tree.get_children():
                 self.potential_tree.delete(child)
 
+            self.potential_row_data_map = {}
+
+            col_biz = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("biz_type"), 2)
+            col_lic = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("license_no"), 3)
             col_perm = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("perm_date"), 4)
             col_store = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("store_name"), 5)
             col_owner = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("owner_name"), 6)
             col_rrn = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("rrn"), 7)
-            col_mobile = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("mobile"), 15)
-            col_phone = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("phone"), 11)
             col_addr = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("address"), 8)
+            col_area = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("area"), 10)
+            col_phone = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("phone"), 11)
+            col_mobile = resolve_column_from_letter_or_name(df, POTENTIAL_COLUMN_MAPPING.get("mobile"), 15)
 
             for idx, row in df.iterrows():
                 seq = idx + 1
+                biz_type = str(row[col_biz]).strip() if col_biz and pd.notna(row[col_biz]) else ""
+                license_no = str(row[col_lic]).strip() if col_lic and pd.notna(row[col_lic]) else ""
                 perm_date = str(row[col_perm]).strip() if col_perm and pd.notna(row[col_perm]) else ""
                 store_name = str(row[col_store]).strip() if col_store and pd.notna(row[col_store]) else ""
                 owner_name = str(row[col_owner]).strip() if col_owner and pd.notna(row[col_owner]) else ""
                 rrn = str(row[col_rrn]).strip() if col_rrn and pd.notna(row[col_rrn]) else ""
-                mobile = str(row[col_mobile]).strip() if col_mobile and pd.notna(row[col_mobile]) else ""
-                phone = str(row[col_phone]).strip() if col_phone and pd.notna(row[col_phone]) else ""
                 addr = str(row[col_addr]).strip() if col_addr and pd.notna(row[col_addr]) else ""
+                area = str(row[col_area]).strip() if col_area and pd.notna(row[col_area]) else ""
+                phone = str(row[col_phone]).strip() if col_phone and pd.notna(row[col_phone]) else ""
+                mobile = str(row[col_mobile]).strip() if col_mobile and pd.notna(row[col_mobile]) else ""
 
                 birth_date_8digit, gender_code = parse_rrn_birth_gender(rrn)
                 gender_str = "남" if gender_code == "M" else ("여" if gender_code == "F" else "")
@@ -2061,16 +2072,32 @@ class ModernSlipUI(ctk.CTk):
                 formatted_phone = format_korean_phone(phone)
                 formatted_perm = format_digits_only(perm_date)
 
-                chk = " ✅ 선택 " if idx == 0 else " ⬜ "
+                # 기본값: 아무것도 체크되어 있지 않음 (요구사항 반영)
+                chk = " ⬜ "
 
-                self.potential_tree.insert(
+                item_id = self.potential_tree.insert(
                     "",
                     "end",
                     values=(chk, seq, formatted_perm, store_name, owner_name, rrn, birth_date_8digit, gender_str, formatted_mobile, formatted_phone, addr)
                 )
 
-            sel_cnt = 1 if len(df) > 0 else 0
-            self.lbl_potential_count.configure(text=f"선택: {sel_cnt}건 / 전체: {len(df)}건")
+                self.potential_row_data_map[item_id] = {
+                    "seq": seq,
+                    "biz_type": biz_type,
+                    "license_no": license_no,
+                    "perm_date": perm_date,
+                    "store_name": store_name,
+                    "owner_name": owner_name,
+                    "rrn": rrn,
+                    "birth_date": birth_date_8digit,
+                    "gender": gender_str,
+                    "mobile": mobile,
+                    "phone": phone,
+                    "address": addr,
+                    "area": area,
+                }
+
+            self.lbl_potential_count.configure(text=f"선택: 0건 / 전체: {len(df)}건")
             self.log(f"📑 잠재회원 엑셀 데이터 총 {len(df)}행이 테이블에 로드되었습니다.")
         except Exception as e:
             self.log(f"❌ 잠재회원 엑셀 로드 예외: {e}")
@@ -2081,11 +2108,11 @@ class ModernSlipUI(ctk.CTk):
 
         dlg = ctk.CTkToplevel(self)
         dlg.title("⚙️ 잠재회원 엑셀 컬럼 매핑 설정")
-        dlg.geometry("540x600")
+        dlg.geometry("540x680")
         dlg.resizable(False, False)
         dlg.transient(self)
         dlg.grab_set()
-        self._center_dialog(dlg, 540, 600)
+        self._center_dialog(dlg, 540, 680)
 
         ctk.CTkLabel(
             dlg,
@@ -2123,22 +2150,25 @@ class ModernSlipUI(ctk.CTk):
                 return options[idx] if idx < len(options) else options[0]
 
         fields = [
+            ("biz_type", "🏷️ 업태명 컬럼:", "C"),
+            ("license_no", "📜 인허가번호 (신고번호) 컬럼:", "D"),
             ("perm_date", "📅 인허가일자 (적용일자) 컬럼:", "E"),
             ("store_name", "🏢 업소명 (상호명) 컬럼:", "F"),
             ("owner_name", "👤 영업자 성명 컬럼:", "G"),
             ("rrn", "🪪 주민등록번호 컬럼:", "H"),
-            ("mobile", "📱 핸드폰번호 컬럼:", "P"),
-            ("phone", "☎️ 소재지 전화번호 컬럼:", "L"),
             ("address", "🏠 소재지 주소 컬럼:", "I"),
+            ("area", "📐 영업장면적 컬럼:", "K"),
+            ("phone", "☎️ 소재지 전화번호 컬럼:", "L"),
+            ("mobile", "📱 핸드폰번호 컬럼:", "P"),
         ]
 
         combos = {}
         for key_type, label_txt, def_letter in fields:
             f = ctk.CTkFrame(dlg, fg_color="#18152E", corner_radius=10)
             f.pack(fill="x", padx=24, pady=3)
-            ctk.CTkLabel(f, text=label_txt, font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"), text_color="#E2E8F0").pack(side="left", padx=12, pady=6)
+            ctk.CTkLabel(f, text=label_txt, font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"), text_color="#E2E8F0").pack(side="left", padx=12, pady=5)
             cb = ctk.CTkComboBox(f, values=options, width=210, font=ctk.CTkFont(family="맑은 고딕", size=12), dropdown_font=ctk.CTkFont(family="맑은 고딕", size=11))
-            cb.pack(side="right", padx=12, pady=6)
+            cb.pack(side="right", padx=12, pady=5)
             cb.set(get_default_opt(key_type, def_letter))
             combos[key_type] = cb
 
@@ -2154,14 +2184,14 @@ class ModernSlipUI(ctk.CTk):
             for k in combos:
                 POTENTIAL_COLUMN_MAPPING[k] = parse_letter(combos[k].get())
             save_settings()
-            messagebox.showinfo("저장 완료", f"✅ 잠재회원등록 엑셀 컬럼 매핑이 저장되었습니다!\n\n• 인허가일자: {POTENTIAL_COLUMN_MAPPING['perm_date']}열 | 영업자: {POTENTIAL_COLUMN_MAPPING['owner_name']}열 | 주민번호: {POTENTIAL_COLUMN_MAPPING['rrn']}열 | 핸드폰: {POTENTIAL_COLUMN_MAPPING['mobile']}열 | 주소: {POTENTIAL_COLUMN_MAPPING['address']}열", parent=dlg)
+            messagebox.showinfo("저장 완료", f"✅ 잠재회원등록 엑셀 컬럼 매핑이 저장되었습니다!\n\n• 업태: {POTENTIAL_COLUMN_MAPPING['biz_type']}열 | 신고번호: {POTENTIAL_COLUMN_MAPPING['license_no']}열 | 인허가일자: {POTENTIAL_COLUMN_MAPPING['perm_date']}열 | 면적: {POTENTIAL_COLUMN_MAPPING['area']}열", parent=dlg)
             dlg.destroy()
             self.load_potential_excel_rows()
 
         def reset_mapping():
-            POTENTIAL_COLUMN_MAPPING.update({"store_name": "F", "owner_name": "G", "rrn": "H", "mobile": "P", "phone": "L", "address": "I", "perm_date": "E"})
+            POTENTIAL_COLUMN_MAPPING.update({"biz_type": "C", "license_no": "D", "perm_date": "E", "store_name": "F", "owner_name": "G", "rrn": "H", "address": "I", "area": "K", "phone": "L", "mobile": "P"})
             save_settings()
-            messagebox.showinfo("복원 완료", "기본값(E열: 인허가일자, F열: 업소명, G열: 영업자, H열: 주민번호, P열: 핸드폰, L열: 전화, I열: 주소)으로 복원되었습니다.", parent=dlg)
+            messagebox.showinfo("복원 완료", "기본값(C: 업태, D: 신고번호, E: 인허가일자, F: 상호, G: 영업자, H: 주민번호, I: 주소, K: 면적, L: 전화, P: 핸드폰)으로 복원되었습니다.", parent=dlg)
             dlg.destroy()
             self.load_potential_excel_rows()
 
@@ -2174,18 +2204,21 @@ class ModernSlipUI(ctk.CTk):
         for child in self.potential_tree.get_children():
             vals = self.potential_tree.item(child, "values")
             if vals and "선택" in vals[0]:
-                selected_rows.append({
-                    "seq": vals[1],
-                    "perm_date": vals[2],
-                    "store_name": vals[3],
-                    "owner_name": vals[4],
-                    "rrn": vals[5],
-                    "birth_date": vals[6],
-                    "gender": vals[7],
-                    "mobile": vals[8],
-                    "phone": vals[9],
-                    "address": vals[10],
-                })
+                data_obj = getattr(self, "potential_row_data_map", {}).get(child, {})
+                if not data_obj:
+                    data_obj = {
+                        "seq": vals[1],
+                        "perm_date": vals[2],
+                        "store_name": vals[3],
+                        "owner_name": vals[4],
+                        "rrn": vals[5],
+                        "birth_date": vals[6],
+                        "gender": vals[7],
+                        "mobile": vals[8],
+                        "phone": vals[9],
+                        "address": vals[10],
+                    }
+                selected_rows.append(data_obj)
 
         if not selected_rows:
             messagebox.showwarning("선택 경고", "등록할 잠재회원 행을 목록에서 1개 이상 체크해 주세요.", parent=self)
