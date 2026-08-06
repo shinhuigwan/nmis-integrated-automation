@@ -3264,104 +3264,17 @@ def register_potential_members_on_nmis(
         log(f"\n▶ [{idx+1}/{len(selected_rows)}] '{store_name}' ({owner_name}) 잠재회원 서식 작성 중...")
 
         try:
-            # 2. 적용일자 fromDate (E열 인허가일자 - 숫자 8자리만 입력)
-            perm_date_digits = format_digits_only(perm_date)
-            if perm_date_digits:
-                log(f"  └ [2] 적용일자(fromDate) '{perm_date_digits}' 입력")
-                page.fill("input[name='fromDate']", perm_date_digits)
-                page.dispatch_event("input[name='fromDate']", "input")
-                page.dispatch_event("input[name='fromDate']", "change")
-                page.wait_for_timeout(200)
-
-            # 3. 신고일자 businessReportDate (E열 인허가일자 - 숫자 8자리만 입력)
-            if perm_date_digits:
-                log(f"  └ [3] 신고일자(businessReportDate) '{perm_date_digits}' 입력")
-                page.fill("input[name='businessReportDate']", perm_date_digits)
-                page.dispatch_event("input[name='businessReportDate']", "input")
-                page.dispatch_event("input[name='businessReportDate']", "change")
-                page.wait_for_timeout(200)
-
-            # 4. 상호 memberName (F열 업소명)
-            if store_name:
-                log(f"  └ [4] 상호(memberName) '{store_name}' 입력")
-                page.fill("input[name='memberName']", store_name)
-                page.dispatch_event("input[name='memberName']", "input")
-                page.wait_for_timeout(200)
-
-            # 5. 신고번호 businessReportNo (D열 인허가번호) & 중복체크
-            if license_no:
-                clean_lic = re.sub(r'[^0-9a-zA-Z-]', '', str(license_no).strip())
-                log(f"  └ [5] 신고번호(businessReportNo) '{clean_lic}' 입력 & 중복체크")
-                page.fill("input[name='businessReportNo']", clean_lic)
-                page.dispatch_event("input[name='businessReportNo']", "input")
-                page.dispatch_event("input[name='businessReportNo']", "change")
-                page.wait_for_timeout(300)
-
-                # 5-1. 중복체크 클릭
-                dup_btn = page.locator("span[lang-code='duplicateCheck'], button:has(span[lang-code='duplicateCheck']), span:has-text('중복체크')").first
-                if dup_btn.count() > 0 and dup_btn.is_visible():
-                    dup_btn.click(force=True)
-                    page.wait_for_timeout(600)
-
-                    # 5-2. 팝업 확인 버튼 클릭
-                    ok_btn = page.locator("button.btn-success:visible, button:has(span[lang-code='ok']):visible, button:has-text('확인'):visible").first
-                    if ok_btn.count() > 0 and ok_btn.is_visible():
-                        ok_btn.click(force=True)
-                        page.wait_for_timeout(400)
-
-            # 6. 주민번호 registNo (H열 앞6자리 + 뒷1자리 = 총 7자리)
-            regist_7 = parse_rrn_7digit(rrn)
-            if regist_7:
-                log(f"  └ [6] 주민번호(registNo) '{regist_7}' (7자리) 입력")
-                page.fill("input[name='registNo']", regist_7)
-                page.dispatch_event("input[name='registNo']", "input")
-                page.wait_for_timeout(200)
-
-            # 7. 업종 분류 (소분류 / 세분류 / 세세분류)
-            classification = classify_business(business_type=biz_type, business_name=store_name)
-            small_cat = classification.get("smallCategory")
-            detail_cat = classification.get("detailCategory")
-            sub_detail_cat = classification.get("subDetailCategory")
-
-            if small_cat and detail_cat and sub_detail_cat:
-                log(f"  └ [7] 업종 분류 선택: {small_cat} -> {detail_cat} -> {sub_detail_cat} (매칭방식: {classification.get('matchedBy')})")
-                # 7-1. 소분류 선택
-                ok_small = select_dropdown_by_label(page, "select[name='businessLevel1Code']", small_cat)
-                page.wait_for_timeout(500)
-
-                # 7-2. 세분류 선택 (목록 갱신 대기 후 선택)
-                ok_detail = select_dropdown_by_label(page, "select[name='businessLevel2Code']", detail_cat)
-                page.wait_for_timeout(500)
-
-                # 7-3. 세세분류 선택 (목록 갱신 대기 후 선택)
-                ok_sub = select_dropdown_by_label(page, "select[name='businessLevel3Code']", sub_detail_cat)
-                page.wait_for_timeout(400)
-
-                if not (ok_small and ok_detail and ok_sub):
-                    log(f"  ⚠️ [업종분류 경고] 드롭다운 일치 항목 탐색 일부 실패 (소:{ok_small}, 세:{ok_detail}, 세세:{ok_sub})")
-            else:
-                log(f"  ⚠️ [업종분류 검토필요] '{biz_type}' / '{store_name}' -> 사유: {classification.get('reason')}")
-
-            # 8. 영업장면적 businessReportArea (K열)
-            if area:
-                clean_area = re.sub(r'[^0-9.]', '', str(area).strip())
-                if clean_area:
-                    log(f"  └ [8] 영업장면적(businessReportArea) '{clean_area}' 입력")
-                    page.fill("input[name='businessReportArea']", clean_area)
-                    page.dispatch_event("input[name='businessReportArea']", "input")
-                    page.wait_for_timeout(200)
-
-            # 3-1. 잠재회원구분 신규위생교육자 변경
-            log("  └ [기존 3-1] 잠재회원구분 '신규위생교육자' 선택")
+            # [1] 잠재회원구분 신규위생교육자 변경
+            log("  └ [1] 잠재회원구분 '신규위생교육자' 선택")
             try:
                 page.select_option("select[name='memberJoinType']", label="신규위생교육자")
             except Exception:
                 page.select_option("select[name='memberJoinType']", value="string:N")
             page.wait_for_timeout(200)
 
-            # 3-2. 영업자 이름 지구본 버튼 클릭 -> 입력 -> 확인
+            # [2] 영업자 성명 (G열) 지구본 버튼 클릭 -> 팝업 입력 -> 확인
             if owner_name:
-                log(f"  └ [기존 3-2] 영업자 이름 팝업 열기 & '{owner_name}' 입력")
+                log(f"  └ [2] 영업자 성명 팝업 열기 & '{owner_name}' 입력")
                 page.evaluate("""() => {
                     var btn = document.querySelector("button[ng-click*='ceoMemberNameFnLang']") || document.querySelector("button img[src*='globe']");
                     if (btn) {
@@ -3382,43 +3295,44 @@ def register_potential_members_on_nmis(
                     ok_btn.click(force=True)
                     page.wait_for_timeout(400)
 
-            # 생년월일 (19xxxxxx 8자리) 및 성별 (H열 주민번호 파싱)
+            # [3] 생년월일 (H열 주민번호 파싱 YYYYMMDD 8자리)
             birth_date_8digit, gender_code = parse_rrn_birth_gender(rrn)
             if birth_date_8digit:
-                log(f"  └ [생년월일] '{birth_date_8digit}' 입력")
+                log(f"  └ [3] 생년월일 '{birth_date_8digit}' (8자리) 입력")
                 page.fill("input[name='birthDate']", birth_date_8digit)
                 page.dispatch_event("input[name='birthDate']", "input")
                 page.dispatch_event("input[name='birthDate']", "change")
                 page.wait_for_timeout(200)
 
+            # [4] 성별 (H열 주민번호 파싱 남/여)
             if gender_code:
                 gender_label = "남" if gender_code == "M" else "여"
-                log(f"  └ [성별] '{gender_label}' 선택")
+                log(f"  └ [4] 성별 '{gender_label}' 선택")
                 try:
                     page.select_option("select[name='genderType']", label=gender_label)
                 except Exception:
                     page.select_option("select[name='genderType']", value=f"string:{gender_code}")
                 page.wait_for_timeout(200)
 
-            # 핸드폰번호 (P열 -> 없으면 L열 소재지전화번호 / 010-XXXX-XXXX 포맷 정제)
+            # [5] 핸드폰번호 (P열 -> 없으면 L열 소재지전화번호 / 010-XXXX-XXXX 포맷 정제)
             final_mobile = format_korean_phone(mobile if mobile else phone)
             if final_mobile:
-                log(f"  └ [핸드폰번호] '{final_mobile}' 입력")
+                log(f"  └ [5] 핸드폰번호 '{final_mobile}' 입력")
                 page.fill("input[name='mobileNo']", final_mobile)
                 page.dispatch_event("input[name='mobileNo']", "input")
                 page.wait_for_timeout(200)
 
-            # 전화번호 (L열 소재지전화번호 / 표준 포맷 정제)
+            # [6] 전화번호 (L열 소재지전화번호 / 표준 포맷 정제)
             final_phone = format_korean_phone(phone)
             if final_phone:
-                log(f"  └ [전화번호] '{final_phone}' 입력")
+                log(f"  └ [6] 전화번호 '{final_phone}' 입력")
                 page.fill("input[name='phoneNo']", final_phone)
                 page.dispatch_event("input[name='phoneNo']", "input")
                 page.wait_for_timeout(200)
 
-            # 주소검색 (I열 또는 J열)
+            # [7] 주소검색 (I열 또는 J열)
             if address:
-                log(f"  └ [주소검색] 팝업 열기 & '{address}' 검색")
+                log(f"  └ [7] 주소검색 팝업 열기 & '{address}' 검색")
                 btn_addr = page.locator("span[lang-code='findAddress'], button:has(span[lang-code='findAddress'])").first
                 if btn_addr.count() > 0:
                     btn_addr.click(force=True)
@@ -3437,9 +3351,91 @@ def register_potential_members_on_nmis(
 
                         td_cell = page.locator("td.col-md-5.ng-binding:visible, td.col-md-5:visible").first
                         if td_cell.count() > 0:
-                            log(f"  └ [주소선택] 항목 클릭선택 완료: {td_cell.inner_text()}")
+                            log(f"  └ [7-3] 주소 항목 클릭선택 완료: {td_cell.inner_text()}")
                             td_cell.click(force=True)
                             page.wait_for_timeout(600)
+
+            # [8] 적용일자 fromDate (E열 인허가일자 - 숫자 8자리만 입력)
+            perm_date_digits = format_digits_only(perm_date)
+            if perm_date_digits:
+                log(f"  └ [8] 적용일자(fromDate) '{perm_date_digits}' 입력")
+                page.fill("input[name='fromDate']", perm_date_digits)
+                page.dispatch_event("input[name='fromDate']", "input")
+                page.dispatch_event("input[name='fromDate']", "change")
+                page.wait_for_timeout(200)
+
+            # [9] 신고일자 businessReportDate (E열 인허가일자 - 숫자 8자리만 입력)
+            if perm_date_digits:
+                log(f"  └ [9] 신고일자(businessReportDate) '{perm_date_digits}' 입력")
+                page.fill("input[name='businessReportDate']", perm_date_digits)
+                page.dispatch_event("input[name='businessReportDate']", "input")
+                page.dispatch_event("input[name='businessReportDate']", "change")
+                page.wait_for_timeout(200)
+
+            # [10] 상호 memberName (F열 업소명)
+            if store_name:
+                log(f"  └ [10] 상호(memberName) '{store_name}' 입력")
+                page.fill("input[name='memberName']", store_name)
+                page.dispatch_event("input[name='memberName']", "input")
+                page.wait_for_timeout(200)
+
+            # [11] 신고번호 businessReportNo (D열 인허가번호) & 중복체크
+            if license_no:
+                clean_lic = re.sub(r'[^0-9a-zA-Z-]', '', str(license_no).strip())
+                log(f"  └ [11] 신고번호(businessReportNo) '{clean_lic}' 입력 & 중복체크")
+                page.fill("input[name='businessReportNo']", clean_lic)
+                page.dispatch_event("input[name='businessReportNo']", "input")
+                page.dispatch_event("input[name='businessReportNo']", "change")
+                page.wait_for_timeout(300)
+
+                dup_btn = page.locator("span[lang-code='duplicateCheck'], button:has(span[lang-code='duplicateCheck']), span:has-text('중복체크')").first
+                if dup_btn.count() > 0 and dup_btn.is_visible():
+                    dup_btn.click(force=True)
+                    page.wait_for_timeout(600)
+
+                    ok_btn = page.locator("button.btn-success:visible, button:has(span[lang-code='ok']):visible, button:has-text('확인'):visible").first
+                    if ok_btn.count() > 0 and ok_btn.is_visible():
+                        ok_btn.click(force=True)
+                        page.wait_for_timeout(400)
+
+            # [12] 주민번호 registNo (H열 앞6자리 + 뒷1자리 = 총 7자리)
+            regist_7 = parse_rrn_7digit(rrn)
+            if regist_7:
+                log(f"  └ [12] 주민번호(registNo) '{regist_7}' (7자리) 입력")
+                page.fill("input[name='registNo']", regist_7)
+                page.dispatch_event("input[name='registNo']", "input")
+                page.wait_for_timeout(200)
+
+            # [13] 업종 분류 (소분류 / 세분류 / 세세분류)
+            classification = classify_business(business_type=biz_type, business_name=store_name)
+            small_cat = classification.get("smallCategory")
+            detail_cat = classification.get("detailCategory")
+            sub_detail_cat = classification.get("subDetailCategory")
+
+            if small_cat and detail_cat and sub_detail_cat:
+                log(f"  └ [13] 업종 분류 선택: {small_cat} -> {detail_cat} -> {sub_detail_cat} (매칭방식: {classification.get('matchedBy')})")
+                ok_small = select_dropdown_by_label(page, "select[name='businessLevel1Code']", small_cat)
+                page.wait_for_timeout(500)
+
+                ok_detail = select_dropdown_by_label(page, "select[name='businessLevel2Code']", detail_cat)
+                page.wait_for_timeout(500)
+
+                ok_sub = select_dropdown_by_label(page, "select[name='businessLevel3Code']", sub_detail_cat)
+                page.wait_for_timeout(400)
+
+                if not (ok_small and ok_detail and ok_sub):
+                    log(f"  ⚠️ [업종분류 경고] 드롭다운 일치 항목 탐색 일부 실패 (소:{ok_small}, 세:{ok_detail}, 세세:{ok_sub})")
+            else:
+                log(f"  ⚠️ [업종분류 검토필요] '{biz_type}' / '{store_name}' -> 사유: {classification.get('reason')}")
+
+            # [14] 영업장면적 businessReportArea (K열)
+            if area:
+                clean_area = re.sub(r'[^0-9.]', '', str(area).strip())
+                if clean_area:
+                    log(f"  └ [14] 영업장면적(businessReportArea) '{clean_area}' 입력")
+                    page.fill("input[name='businessReportArea']", clean_area)
+                    page.dispatch_event("input[name='businessReportArea']", "input")
+                    page.wait_for_timeout(200)
 
             log(f"✅ [{seq}] '{store_name}' 잠재회원 1~8단계 서식 기입 완료! (등록 버튼 클릭 전 단계)")
             success_count += 1
