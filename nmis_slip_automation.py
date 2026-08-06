@@ -3261,6 +3261,8 @@ def register_potential_members_on_nmis(
         biz_type = row.get("biz_type", "")
         area = row.get("area", "")
 
+        perm_date_digits = format_digits_only(perm_date)
+
         log(f"\n▶ [{idx+1}/{len(selected_rows)}] '{store_name}' ({owner_name}) 잠재회원 서식 작성 중...")
 
         try:
