@@ -3120,6 +3120,19 @@ def parse_rrn_birth_gender(rrn_val: str | int | float) -> tuple[str, str]:
     return birth_date_8digit, gender_code
 
 
+def parse_rrn_7digit(rrn_val: str) -> str:
+    """
+    주민등록번호/사업자번호에서 하이픈, 공백을 제거하고 앞 6자리 + 7번째 자리(뒷자리 첫 숫자) 총 7자리를 반환합니다.
+    (예: "911018-1234567" -> "9110181")
+    """
+    if not rrn_val:
+        return ""
+    clean = re.sub(r'[^0-9]', '', str(rrn_val).strip())
+    if len(clean) >= 7:
+        return clean[:7]
+    return clean
+
+
 def navigate_to_nmis_potential_member_page(page: Page, log_func: Callable[[str], None] | None = None) -> bool:
     """
     NMIS '회원 > 회원관리 > 잠재회원등록' (master/member/create) 페이지로 100% 확실히 이동합니다.
