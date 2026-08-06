@@ -3517,13 +3517,42 @@ def register_potential_members_on_nmis(
             # [Phase 2 최종 페이지 작성]
             log("  └ [Phase 2] 이동된 최종 페이지 서식 작성 개시...")
 
+            # Phase 2 로딩 검증 및 등록>확인>확인 재시도 루프 (최대 2회)
+            for p2_retry in range(1, 3):
+                inp_p2_from = page.locator("input[name='fromDate']:visible").first
+                if inp_p2_from.count() > 0 and inp_p2_from.is_visible():
+                    break
+
+                log(f"  ⚠️ [Phase 2 로딩 검증] Phase 2-1(fromDate) 입력창 미발견! 등록 ➔ 확인 팝업 재시도 진행 ({p2_retry}/2)...")
+
+                # 1. 등록 버튼 재클릭시도
+                btn_cr = page.locator("button:has(span[lang-code='create']), span[lang-code='create']").first
+                if btn_cr.count() > 0 and btn_cr.is_visible():
+                    log("  └ [재시도] '등록' 버튼 재클릭...")
+                    btn_cr.click(force=True)
+                    page.wait_for_timeout(800)
+
+                # 2. 확인 팝업 승인 재시도
+                for _ in range(3):
+                    ok_btn = page.locator("button[ng-click*='fnConfirm']:visible, button[lang-code='ok']:visible, button.btn-success:visible, button:has-text('확인'):visible").first
+                    if ok_btn.count() > 0 and ok_btn.is_visible():
+                        log("  └ [재시도] 확인 팝업 '확인' 클릭 완료")
+                        ok_btn.click(force=True)
+                        page.wait_for_timeout(1000)
+                    else:
+                        break
+
+                page.wait_for_timeout(1200)
+
             # Phase 2 - [1] 적용일자 fromDate (E열 인허가일자 - 숫자 8자리만 입력)
             if perm_date_digits:
                 log(f"  └ [Phase 2 - 1] 적용일자(fromDate) '{perm_date_digits}' 입력")
-                page.fill("input[name='fromDate']", perm_date_digits)
-                page.dispatch_event("input[name='fromDate']", "input")
-                page.dispatch_event("input[name='fromDate']", "change")
-                page.wait_for_timeout(200)
+                inp_from = page.locator("input[name='fromDate']").first
+                if inp_from.count() > 0:
+                    inp_from.fill(perm_date_digits)
+                    page.dispatch_event("input[name='fromDate']", "input")
+                    page.dispatch_event("input[name='fromDate']", "change")
+                    page.wait_for_timeout(200)
 
             # Phase 2 - [2] 신고일자 businessReportDate (E열 인허가일자 - 숫자 8자리만 입력)
             if perm_date_digits:
