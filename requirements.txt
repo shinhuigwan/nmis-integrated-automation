@@ -8,3 +8,5 @@ pywin32>=306
 customtkinter>=6.0.0
 darkdetect>=0.8.0
 pillow>=10.0.0
+pypdf>=5.0.0
+olefile>=0.47

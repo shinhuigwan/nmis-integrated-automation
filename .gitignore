@@ -1,4 +1,5 @@
 .venv/
+.venv_runtime/
 __pycache__/
 *.pyc
 *.pyo
@@ -7,5 +8,7 @@ __pycache__/
 .vscode/
 _fix_*.py
 tools_debug/
+data/
+NMIS_접수대장/
 nmis_slip_ui_backup.py
 settings.json
