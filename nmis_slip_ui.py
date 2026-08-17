@@ -13,10 +13,11 @@ from datetime import date
 from pathlib import Path
 import threading
 import subprocess
+import time
 import urllib.request
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from typing import Callable
+from typing import Any, Callable
 
 import customtkinter as ctk
 import openpyxl
@@ -43,6 +44,27 @@ from nmis_slip_automation import (
     resolve_column_from_letter_or_name,
     format_korean_phone,
     format_digits_only,
+)
+from receipt_register import (
+    ReceiptHistory,
+    ReceiptMailItem,
+    apply_history,
+    complete_registered_attachment,
+    extract_receipt_document_metadata,
+    filter_receipt_candidate_documents,
+    parse_iso_date,
+    protect_windows_secret,
+    register_receipt_document_on_nmis,
+    search_naver_hwp_mail,
+    sort_receipt_items_oldest_first,
+    unprotect_windows_secret,
+)
+from membership_fee_register import (
+    FeePaymentItem,
+    ensure_nmis_logged_in,
+    navigate_to_fee_management,
+    parse_fee_payment_excel,
+    register_fee_payment_on_nmis,
 )
 
 def find_chrome() -> Path | None:
@@ -121,6 +143,18 @@ POTENTIAL_COLUMN_MAPPING: dict[str, str] = {
     "mobile": "P",
 }
 
+RECEIPT_SETTINGS: dict[str, Any] = {
+    "naver_id": "",
+    "naver_app_password_dpapi": "",
+    "sender_filter": "krbajb5980@daum.net",
+    "all_senders": True,
+    "download_dir": str(Path.home() / "Downloads" / "NMIS_접수대장"),
+}
+
+FEE_PAYMENT_SETTINGS: dict[str, Any] = {
+    "excel_path": str(Path.home() / "Desktop" / "통장이체_거래내역_정리.xlsx"),
+}
+
 def get_excel_column_headers(file_path: str) -> list[dict]:
     if not file_path or not os.path.exists(file_path):
         return []
@@ -142,7 +176,7 @@ def get_excel_column_headers(file_path: str) -> list[dict]:
         return []
 
 def load_settings() -> None:
-    global KEYWORD_RULES, CONFIRM_SELECTORS, MACRO_STEPS, NMIS_USER_ID, NMIS_PASSWORD, SLIP_COLUMN_MAPPING, MEMBER_COLUMN_MAPPING, POTENTIAL_COLUMN_MAPPING
+    global KEYWORD_RULES, CONFIRM_SELECTORS, MACRO_STEPS, NMIS_USER_ID, NMIS_PASSWORD, SLIP_COLUMN_MAPPING, MEMBER_COLUMN_MAPPING, POTENTIAL_COLUMN_MAPPING, RECEIPT_SETTINGS, FEE_PAYMENT_SETTINGS
     if not SETTINGS_FILE.is_file():
         return
     try:
@@ -163,6 +197,12 @@ def load_settings() -> None:
             MEMBER_COLUMN_MAPPING.update(data["member_column_mapping"])
         if "potential_column_mapping" in data:
             POTENTIAL_COLUMN_MAPPING.update(data["potential_column_mapping"])
+        if "receipt_settings" in data:
+            RECEIPT_SETTINGS.update(data["receipt_settings"])
+        if "fee_payment_settings" in data:
+            FEE_PAYMENT_SETTINGS.update(data["fee_payment_settings"])
+        if RECEIPT_SETTINGS.get("sender_filter") in {"", "한국외식업중앙회", "외식업전북지회"}:
+            RECEIPT_SETTINGS["sender_filter"] = "krbajb5980@daum.net"
     except Exception as e:
         print(f"설정 로드 실패: {e}")
 
@@ -176,6 +216,9 @@ def save_settings() -> None:
         "slip_column_mapping": SLIP_COLUMN_MAPPING,
         "member_column_mapping": MEMBER_COLUMN_MAPPING,
         "potential_column_mapping": POTENTIAL_COLUMN_MAPPING,
+        # 네이버 앱 비밀번호는 receipt_settings 안에 Windows DPAPI 암호문으로만 저장합니다.
+        "receipt_settings": RECEIPT_SETTINGS,
+        "fee_payment_settings": FEE_PAYMENT_SETTINGS,
     }
     try:
         SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -222,6 +265,16 @@ class ModernSlipUI(ctk.CTk):
         self.all_transactions: dict[str, Transaction] = {}
         self.tx_type: dict[str, str] = {}
         self.tx_settings: dict[str, dict] = {}
+        self.receipt_items: dict[str, ReceiptMailItem] = {}
+        self.receipt_history = ReceiptHistory(Path(__file__).parent / "data" / "receipt_history.sqlite3")
+        self.receipt_running = False
+        self.receipt_checked_ids: set[str] = set()
+        self.receipt_drag_check_value: bool | None = None
+        self.receipt_drag_seen_ids: set[str] = set()
+        self.fee_items: dict[str, FeePaymentItem] = {}
+        self.fee_checked_ids: set[str] = set()
+        self.fee_running = False
+        self.fee_stop_requested = False
 
         # 메인 그리드 구성 (사이드바 0, 메인 1)
         self.grid_columnconfigure(1, weight=1)
@@ -244,7 +297,7 @@ class ModernSlipUI(ctk.CTk):
     def _build_sidebar(self) -> None:
         self.sidebar = ctk.CTkFrame(self, width=220, corner_radius=0, fg_color="#141126")
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(6, weight=1)
+        self.sidebar.grid_rowconfigure(8, weight=1)
 
         # 로고
         logo_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
@@ -315,9 +368,35 @@ class ModernSlipUI(ctk.CTk):
         )
         self.btn_tab_potential.grid(row=4, column=0, padx=16, pady=6, sticky="ew")
 
+        self.btn_tab_receipt = ctk.CTkButton(
+            self.sidebar,
+            text="📥 접수대장",
+            font=ctk.CTkFont(family="맑은 고딕", size=13, weight="bold"),
+            fg_color="transparent",
+            hover_color="#26214A",
+            text_color="#CBD5E1",
+            height=42,
+            corner_radius=10,
+            command=lambda: self._select_tab("receipt")
+        )
+        self.btn_tab_receipt.grid(row=5, column=0, padx=16, pady=6, sticky="ew")
+
+        self.btn_tab_fee = ctk.CTkButton(
+            self.sidebar,
+            text="💳 회비 입금등록",
+            font=ctk.CTkFont(family="맑은 고딕", size=13, weight="bold"),
+            fg_color="transparent",
+            hover_color="#26214A",
+            text_color="#CBD5E1",
+            height=42,
+            corner_radius=10,
+            command=lambda: self._select_tab("fee")
+        )
+        self.btn_tab_fee.grid(row=6, column=0, padx=16, pady=6, sticky="ew")
+
         # Chrome Status Box in Sidebar
         status_box = ctk.CTkFrame(self.sidebar, fg_color="#1E1B3A", corner_radius=12)
-        status_box.grid(row=5, column=0, padx=16, pady=16, sticky="ew")
+        status_box.grid(row=7, column=0, padx=16, pady=16, sticky="ew")
 
         ctk.CTkLabel(
             status_box,
@@ -375,11 +454,15 @@ class ModernSlipUI(ctk.CTk):
         self.tab_slip_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
         self.tab_member_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
         self.tab_potential_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        self.tab_receipt_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        self.tab_fee_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
 
         self._build_monthly_tab(self.tab_monthly_frame)
         self._build_slip_tab(self.tab_slip_frame)
         self._build_member_tab(self.tab_member_frame)
         self._build_potential_tab(self.tab_potential_frame)
+        self._build_receipt_tab(self.tab_receipt_frame)
+        self._build_fee_tab(self.tab_fee_frame)
 
         # 초기 탭 표시 (월보고 자동 연동)
         self._select_tab("monthly")
@@ -392,11 +475,15 @@ class ModernSlipUI(ctk.CTk):
         self.tab_slip_frame.grid_forget()
         self.tab_member_frame.grid_forget()
         self.tab_potential_frame.grid_forget()
+        self.tab_receipt_frame.grid_forget()
+        self.tab_fee_frame.grid_forget()
 
         self.btn_tab_monthly.configure(fg_color="transparent", text_color="#CBD5E1")
         self.btn_tab_slip.configure(fg_color="transparent", text_color="#CBD5E1")
         self.btn_tab_member.configure(fg_color="transparent", text_color="#CBD5E1")
         self.btn_tab_potential.configure(fg_color="transparent", text_color="#CBD5E1")
+        self.btn_tab_receipt.configure(fg_color="transparent", text_color="#CBD5E1")
+        self.btn_tab_fee.configure(fg_color="transparent", text_color="#CBD5E1")
 
         if tab_name == "monthly":
             self.tab_monthly_frame.grid(row=1, column=0, padx=24, pady=10, sticky="nsew")
@@ -414,6 +501,14 @@ class ModernSlipUI(ctk.CTk):
             self.tab_potential_frame.grid(row=1, column=0, padx=24, pady=10, sticky="nsew")
             self.btn_tab_potential.configure(fg_color="#8B5CF6", text_color="#FFFFFF")
             self.main_title_label.configure(text="📑 잠재회원 등록 시스템 (1~8단계 서식 자동 작성)")
+        elif tab_name == "receipt":
+            self.tab_receipt_frame.grid(row=1, column=0, padx=24, pady=10, sticky="nsew")
+            self.btn_tab_receipt.configure(fg_color="#8B5CF6", text_color="#FFFFFF")
+            self.main_title_label.configure(text="📥 네이버 메일 → NMIS 접수대장 자동화")
+        elif tab_name == "fee":
+            self.tab_fee_frame.grid(row=1, column=0, padx=24, pady=10, sticky="nsew")
+            self.btn_tab_fee.configure(fg_color="#8B5CF6", text_color="#FFFFFF")
+            self.main_title_label.configure(text="💳 엑셀 → NMIS 월회비 입금등록")
 
     # ── [탭 2] 월보고 자동 연동 뷰 ──────────────────────────────────────────
 
@@ -786,34 +881,34 @@ class ModernSlipUI(ctk.CTk):
         threading.Thread(target=worker, daemon=True).start()
 
     def start_attachable_chrome(self) -> None:
-        if cdp_is_ready():
+        already_connected = cdp_is_ready()
+        if already_connected:
             self.browser_status_var.set("🟢 Chrome 연결됨 (Port 9222)")
-            self.log("이미 Chrome이 실행 중이며 9222 포트로 연결되어 있습니다.")
-            return
+            self.log("연결된 Chrome의 NMIS 로그인 상태를 다시 확인합니다.")
+        else:
+            chrome = find_chrome()
+            if not chrome:
+                messagebox.showerror("Chrome 오류", "Chrome 실행 파일(chrome.exe)을 찾지 못했습니다.")
+                return
 
-        chrome = find_chrome()
-        if not chrome:
-            messagebox.showerror("Chrome 오류", "Chrome 실행 파일(chrome.exe)을 찾지 못했습니다.")
-            return
-
-        profile = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "nmis-cdp-profile"
-        try:
-            subprocess.Popen([
-                str(chrome),
-                "--remote-debugging-port=9222",
-                f"--user-data-dir={profile}",
-                "http://nmis.foodservice.or.kr/"
-            ], close_fds=True)
-            self.browser_status_var.set("🟡 Chrome 시작 중...")
-            self.log("🌐 연결용 Chrome 브라우저 오픈 실행 중... 자동 로그인을 진행합니다.")
-        except Exception as e:
-            self.log(f"❌ Chrome 실행 실패: {e}")
-            messagebox.showerror("Chrome 오류", f"Chrome 실행 실패: {e}")
-            return
+            profile = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "nmis-cdp-profile"
+            try:
+                subprocess.Popen([
+                    str(chrome),
+                    "--remote-debugging-port=9222",
+                    f"--user-data-dir={profile}",
+                    "http://nmis.foodservice.or.kr/"
+                ], close_fds=True)
+                self.browser_status_var.set("🟡 Chrome 시작 중...")
+                self.log("🌐 연결용 Chrome 브라우저 오픈 실행 중... 자동 로그인을 진행합니다.")
+            except Exception as e:
+                self.log(f"❌ Chrome 실행 실패: {e}")
+                messagebox.showerror("Chrome 오류", f"Chrome 실행 실패: {e}")
+                return
 
         def auto_login_worker():
             import time
-            time.sleep(3)  # Chrome 로딩 대기
+            time.sleep(1 if already_connected else 3)  # 기존 연결은 짧게, 새 Chrome은 로딩 대기
 
             try:
                 with sync_playwright() as pw:
@@ -824,31 +919,7 @@ class ModernSlipUI(ctk.CTk):
                         self.after(0, lambda: self.browser_status_var.set("🟢 Chrome 연결됨 (Port 9222)"))
                         return
 
-                    time.sleep(1)
-
-                    # 아이디/비밀번호 자동 입력
-                    user_id_loc = page.locator("#userId")
-                    if user_id_loc.count() > 0 and user_id_loc.is_visible():
-                        user_id_loc.fill(NMIS_USER_ID)
-                        self.log(f"아이디 입력 완료: {NMIS_USER_ID}")
-
-                        pw_loc = page.locator("#userPass")
-                        if pw_loc.count() > 0 and pw_loc.is_visible():
-                            pw_loc.fill(NMIS_PASSWORD)
-                            self.log("비밀번호 입력 완료")
-                            pw_loc.press("Enter")
-                            self.log("로그인 요청 전송 완료")
-                            time.sleep(2)
-
-                    # 비밀번호 갱신 팝업 닫기 처리
-                    cancel_btn = page.locator("button[ng-click*='fnCancel']")
-                    deadline = time.monotonic() + 4.0
-                    while time.monotonic() < deadline:
-                        if cancel_btn.count() > 0 and cancel_btn.first.is_visible():
-                            cancel_btn.first.click(force=True)
-                            self.log("비밀번호 갱신 팝업 취소 처리 완료")
-                            break
-                        time.sleep(0.3)
+                    ensure_nmis_logged_in(page, NMIS_USER_ID, NMIS_PASSWORD, self.log)
 
                     self.log("🎉 Chrome 연결 및 NMIS 로그인 완결!")
                     self.after(0, lambda: self.browser_status_var.set("🟢 Chrome 연결됨 (Port 9222)"))
@@ -1180,6 +1251,860 @@ class ModernSlipUI(ctk.CTk):
             with sync_playwright() as pw:
                 page = find_nmis_page(pw.chromium.connect_over_cdp(CDP_URL))
                 register_ship_documents_on_nmis(page, send_date=send_date, report_month_label=month_label, only_first_doc=only_first_doc, log_cb=self.log)
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ── 접수대장 자동화 ─────────────────────────────────────────────────────
+
+    def _build_receipt_tab(self, parent: ctk.CTkFrame) -> None:
+        parent.grid_rowconfigure(1, weight=1)
+        parent.grid_columnconfigure(0, weight=1)
+
+        today = date.today()
+        card1 = ctk.CTkFrame(parent, fg_color="#18152E", border_color="#2E2756", border_width=1, corner_radius=16)
+        card1.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+
+        ctk.CTkLabel(
+            card1,
+            text="📨 [1] 네이버 메일 검색 조건",
+            font=ctk.CTkFont(family="맑은 고딕", size=15, weight="bold"),
+            text_color="#A855F7",
+        ).pack(anchor="w", padx=20, pady=(16, 10))
+
+        account_row = ctk.CTkFrame(card1, fg_color="transparent")
+        account_row.pack(fill="x", padx=20, pady=(0, 8))
+        ctk.CTkLabel(account_row, text="네이버 ID", width=75, anchor="w", text_color="#E2E8F0").pack(side="left")
+        self.receipt_naver_id_var = tk.StringVar(value=RECEIPT_SETTINGS.get("naver_id", ""))
+        ctk.CTkEntry(account_row, textvariable=self.receipt_naver_id_var, width=180, fg_color="#120F24", border_color="#3B326B").pack(side="left", padx=(0, 14))
+        ctk.CTkLabel(account_row, text="앱 비밀번호", width=85, anchor="w", text_color="#E2E8F0").pack(side="left")
+        saved_app_password = unprotect_windows_secret(
+            RECEIPT_SETTINGS.get("naver_app_password_dpapi", "")
+        )
+        self.receipt_naver_password_var = tk.StringVar(value=saved_app_password)
+        ctk.CTkEntry(account_row, textvariable=self.receipt_naver_password_var, width=190, show="●", fg_color="#120F24", border_color="#3B326B").pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(account_row, text="※ Windows 암호화 저장", text_color="#10B981", font=ctk.CTkFont(size=10)).pack(side="left")
+
+        filter_row = ctk.CTkFrame(card1, fg_color="transparent")
+        filter_row.pack(fill="x", padx=20, pady=(0, 8))
+        ctk.CTkLabel(filter_row, text="조회 기간", width=75, anchor="w", text_color="#E2E8F0").pack(side="left")
+        self.receipt_from_date_var = tk.StringVar(value="2026-01-01")
+        self.receipt_to_date_var = tk.StringVar(value=today.strftime("%Y-%m-%d"))
+        ctk.CTkEntry(filter_row, textvariable=self.receipt_from_date_var, width=105, fg_color="#120F24", border_color="#3B326B").pack(side="left")
+        ctk.CTkLabel(filter_row, text="~", width=24).pack(side="left")
+        ctk.CTkEntry(filter_row, textvariable=self.receipt_to_date_var, width=105, fg_color="#120F24", border_color="#3B326B").pack(side="left", padx=(0, 18))
+        ctk.CTkLabel(filter_row, text="발신자", width=55, anchor="w", text_color="#E2E8F0").pack(side="left")
+        self.receipt_sender_var = tk.StringVar(value=RECEIPT_SETTINGS.get("sender_filter", "krbajb5980@daum.net"))
+        self.receipt_sender_entry = ctk.CTkEntry(
+            filter_row,
+            textvariable=self.receipt_sender_var,
+            width=160,
+            fg_color="#120F24",
+            border_color="#3B326B",
+        )
+        self.receipt_sender_entry.pack(side="left", padx=(0, 8))
+        self.receipt_all_senders_var = tk.BooleanVar(
+            value=bool(RECEIPT_SETTINGS.get("all_senders", True))
+        )
+        ctk.CTkCheckBox(
+            filter_row,
+            text="전체 발신자",
+            variable=self.receipt_all_senders_var,
+            command=self._toggle_receipt_sender_filter,
+            width=105,
+            text_color="#E2E8F0",
+        ).pack(side="left")
+        self._toggle_receipt_sender_filter()
+
+        folder_row = ctk.CTkFrame(card1, fg_color="transparent")
+        folder_row.pack(fill="x", padx=20, pady=(0, 8))
+        ctk.CTkLabel(folder_row, text="저장 폴더", width=75, anchor="w", text_color="#E2E8F0").pack(side="left")
+        self.receipt_download_dir_var = tk.StringVar(value=RECEIPT_SETTINGS.get("download_dir", ""))
+        ctk.CTkEntry(folder_row, textvariable=self.receipt_download_dir_var, fg_color="#120F24", border_color="#3B326B").pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(folder_row, text="폴더 선택", width=90, fg_color="#374151", hover_color="#4B5563", command=self._browse_receipt_download_dir).pack(side="left")
+
+        action_row = ctk.CTkFrame(card1, fg_color="transparent")
+        action_row.pack(fill="x", padx=20, pady=(2, 14))
+        self.receipt_status_var = tk.StringVar(value="대기")
+        ctk.CTkLabel(action_row, textvariable=self.receipt_status_var, text_color="#10B981", font=ctk.CTkFont(family="맑은 고딕", size=11, weight="bold")).pack(side="left")
+        self.receipt_search_button = ctk.CTkButton(
+            action_row,
+            text="🔍 메일 조회",
+            width=120,
+            fg_color="#8B5CF6",
+            hover_color="#7C3AED",
+            command=self.start_receipt_mail_search,
+        )
+        self.receipt_search_button.pack(side="right")
+
+        card2 = ctk.CTkFrame(parent, fg_color="#18152E", border_color="#2E2756", border_width=1, corner_radius=16)
+        card2.grid(row=1, column=0, sticky="nsew", pady=(0, 12))
+        card2.grid_rowconfigure(1, weight=1)
+        card2.grid_columnconfigure(0, weight=1)
+
+        header = ctk.CTkFrame(card2, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 4))
+        ctk.CTkLabel(header, text="📋 [2] 접수 대상 HWP/PDF 목록", font=ctk.CTkFont(family="맑은 고딕", size=14, weight="bold"), text_color="#A855F7").pack(side="left")
+        self.receipt_selection_var = tk.StringVar(value="실행 범위 0건")
+        ctk.CTkLabel(header, textvariable=self.receipt_selection_var, font=ctk.CTkFont(size=10, weight="bold"), text_color="#10B981").pack(side="right", padx=(8, 0))
+        ctk.CTkButton(header, text="전체 해제", width=72, height=26, fg_color="#374151", hover_color="#4B5563", command=self._uncheck_all_receipts).pack(side="right", padx=(6, 0))
+        ctk.CTkButton(header, text="전체 선택", width=72, height=26, fg_color="#4C1D95", hover_color="#5B21B6", command=self._check_all_receipts).pack(side="right", padx=(8, 0))
+        ctk.CTkLabel(header, text="체크 열 드래그 또는 Ctrl/Shift 선택", font=ctk.CTkFont(size=10), text_color="#94A3B8").pack(side="right", padx=(0, 8))
+
+        table_box = tk.Frame(card2, bg="#18152E")
+        table_box.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 12))
+        cols = ("checked", "date", "sender", "subject", "file", "receipt", "status")
+        self.receipt_tree = ttk.Treeview(table_box, columns=cols, show="headings", selectmode="extended", height=8)
+        headings = {
+            "checked": ("선택", 48, "center"),
+            "date": ("수신일", 90, "center"),
+            "sender": ("발신자", 150, "w"),
+            "subject": ("메일 제목", 280, "w"),
+            "file": ("HWP/PDF 첨부파일", 220, "w"),
+            "receipt": ("접수번호", 90, "center"),
+            "status": ("상태", 100, "center"),
+        }
+        for name, (label, width, anchor) in headings.items():
+            self.receipt_tree.heading(name, text=label)
+            self.receipt_tree.column(name, width=width, anchor=anchor)
+        sy = ttk.Scrollbar(table_box, orient="vertical", command=self.receipt_tree.yview)
+        sx = ttk.Scrollbar(table_box, orient="horizontal", command=self.receipt_tree.xview)
+        self.receipt_tree.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
+        self.receipt_tree.grid(row=0, column=0, sticky="nsew")
+        sy.grid(row=0, column=1, sticky="ns")
+        sx.grid(row=1, column=0, sticky="ew")
+        table_box.grid_rowconfigure(0, weight=1)
+        table_box.grid_columnconfigure(0, weight=1)
+        self.receipt_tree.tag_configure("done", background="#163A2A")
+        self.receipt_tree.tag_configure("error", background="#3E1A1A")
+        self.receipt_tree.bind("<Button-1>", self._on_receipt_tree_press, add="+")
+        self.receipt_tree.bind("<B1-Motion>", self._on_receipt_tree_drag, add="+")
+        self.receipt_tree.bind("<ButtonRelease-1>", self._on_receipt_tree_release, add="+")
+        self.receipt_tree.bind("<<TreeviewSelect>>", lambda _event: self._update_receipt_selection_status(), add="+")
+
+        card3 = ctk.CTkFrame(parent, fg_color="#18152E", border_color="#2E2756", border_width=1, corner_radius=16)
+        card3.grid(row=2, column=0, sticky="ew")
+        footer = ctk.CTkFrame(card3, fg_color="transparent")
+        footer.pack(fill="x", padx=18, pady=12)
+        ctk.CTkLabel(
+            footer,
+            text="원본 HWP/PDF는 보존하고 ‘접수완료’ 하위 폴더에 결과 파일을 저장합니다.",
+            text_color="#94A3B8",
+            font=ctk.CTkFont(size=10),
+        ).pack(side="left")
+        self.receipt_run_button = ctk.CTkButton(
+            footer,
+            text="🚀 선택 문서 접수 등록",
+            width=180,
+            fg_color="#10B981",
+            hover_color="#059669",
+            command=self.start_receipt_registration,
+        )
+        self.receipt_run_button.pack(side="right")
+
+    def _set_receipt_checked(self, item_id: str, checked: bool) -> None:
+        if item_id not in self.receipt_items:
+            return
+        if checked:
+            self.receipt_checked_ids.add(item_id)
+        else:
+            self.receipt_checked_ids.discard(item_id)
+        if self.receipt_tree.exists(item_id):
+            self.receipt_tree.set(item_id, "checked", "☑" if checked else "☐")
+        self._update_receipt_selection_status()
+
+    def _check_all_receipts(self) -> None:
+        for item_id, item in self.receipt_items.items():
+            self._set_receipt_checked(item_id, item.status != "처리완료")
+
+    def _uncheck_all_receipts(self) -> None:
+        for item_id in tuple(self.receipt_checked_ids):
+            self._set_receipt_checked(item_id, False)
+        self.receipt_tree.selection_remove(*self.receipt_tree.selection())
+        self._update_receipt_selection_status()
+
+    def _update_receipt_selection_status(self) -> None:
+        checked_count = len(self.receipt_checked_ids)
+        highlighted_count = len(self.receipt_tree.selection()) if hasattr(self, "receipt_tree") else 0
+        if checked_count:
+            text = f"실행 범위 {checked_count}건"
+        elif highlighted_count:
+            text = f"강조 선택 {highlighted_count}건"
+        else:
+            text = "실행 범위 0건"
+        self.receipt_selection_var.set(text)
+
+    def _on_receipt_tree_press(self, event) -> str | None:
+        if self.receipt_tree.identify_region(event.x, event.y) != "cell":
+            return None
+        if self.receipt_tree.identify_column(event.x) != "#1":
+            self.receipt_drag_check_value = None
+            self.receipt_drag_seen_ids.clear()
+            return None
+        item_id = self.receipt_tree.identify_row(event.y)
+        if not item_id:
+            return "break"
+        checked = item_id not in self.receipt_checked_ids
+        self.receipt_drag_check_value = checked
+        self.receipt_drag_seen_ids = {item_id}
+        self._set_receipt_checked(item_id, checked)
+        return "break"
+
+    def _on_receipt_tree_drag(self, event) -> str | None:
+        if self.receipt_drag_check_value is None:
+            return None
+        item_id = self.receipt_tree.identify_row(event.y)
+        if item_id and item_id not in self.receipt_drag_seen_ids:
+            self.receipt_drag_seen_ids.add(item_id)
+            self._set_receipt_checked(item_id, self.receipt_drag_check_value)
+            self.receipt_tree.see(item_id)
+        return "break"
+
+    def _on_receipt_tree_release(self, _event) -> str | None:
+        was_check_drag = self.receipt_drag_check_value is not None
+        self.receipt_drag_check_value = None
+        self.receipt_drag_seen_ids.clear()
+        return "break" if was_check_drag else None
+
+    def _browse_receipt_download_dir(self) -> None:
+        selected = filedialog.askdirectory(
+            title="접수대장 첨부문서 저장 폴더 선택",
+            initialdir=self.receipt_download_dir_var.get() or str(Path.home() / "Downloads"),
+        )
+        if selected:
+            self.receipt_download_dir_var.set(selected)
+
+    def _toggle_receipt_sender_filter(self) -> None:
+        state = "disabled" if self.receipt_all_senders_var.get() else "normal"
+        self.receipt_sender_entry.configure(state=state)
+
+    def _save_receipt_preferences(self, app_password: str | None = None) -> None:
+        RECEIPT_SETTINGS.update(
+            {
+                "naver_id": self.receipt_naver_id_var.get().strip(),
+                "sender_filter": self.receipt_sender_var.get().strip(),
+                "all_senders": bool(self.receipt_all_senders_var.get()),
+                "download_dir": self.receipt_download_dir_var.get().strip(),
+            }
+        )
+        if app_password is not None:
+            RECEIPT_SETTINGS["naver_app_password_dpapi"] = protect_windows_secret(app_password)
+        save_settings()
+
+    def _refresh_receipt_tree(self) -> None:
+        self.receipt_checked_ids.intersection_update(self.receipt_items)
+        for child in self.receipt_tree.get_children():
+            self.receipt_tree.delete(child)
+        for stable_id, item in self.receipt_items.items():
+            tag = "done" if item.status == "처리완료" else ("error" if "오류" in item.status else "")
+            self.receipt_tree.insert(
+                "",
+                "end",
+                iid=stable_id,
+                values=(
+                    "☑" if stable_id in self.receipt_checked_ids else "☐",
+                    item.received_at.strftime("%Y-%m-%d"),
+                    item.sender_name or item.sender_address,
+                    item.subject,
+                    item.attachment_name,
+                    item.receipt_no,
+                    item.status,
+                ),
+                tags=(tag,) if tag else (),
+            )
+        self._update_receipt_selection_status()
+
+    def _update_receipt_row(self, item: ReceiptMailItem) -> None:
+        def update() -> None:
+            if not self.receipt_tree.exists(item.stable_id):
+                return
+            tag = "done" if item.status == "처리완료" else ("error" if "오류" in item.status else "")
+            self.receipt_tree.item(
+                item.stable_id,
+                values=(
+                    "☑" if item.stable_id in self.receipt_checked_ids else "☐",
+                    item.received_at.strftime("%Y-%m-%d"),
+                    item.sender_name or item.sender_address,
+                    item.subject,
+                    item.attachment_name,
+                    item.receipt_no,
+                    item.status,
+                ),
+                tags=(tag,) if tag else (),
+            )
+        self.after(0, update)
+
+    def _show_receipt_batch_result(self, completed: int, failed: int, total: int) -> None:
+        """모든 선택 문서 처리가 끝난 뒤 결과 팝업을 한 번만 앞쪽에 표시한다."""
+        summary = f"접수 처리 완료: 성공 {completed}건 / 실패 {failed}건 / 전체 {total}건"
+        self.receipt_status_var.set(summary)
+        self.receipt_run_button.configure(state="normal")
+        try:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+            self.attributes("-topmost", True)
+        except Exception:
+            pass
+        try:
+            if failed:
+                messagebox.showwarning("접수대장 처리 결과", summary, parent=self)
+            else:
+                messagebox.showinfo("접수대장 처리 결과", summary, parent=self)
+        finally:
+            try:
+                self.attributes("-topmost", False)
+            except Exception:
+                pass
+
+    def start_receipt_mail_search(self) -> None:
+        if self.receipt_running:
+            messagebox.showinfo("작업 중", "현재 접수대장 작업이 진행 중입니다.")
+            return
+        try:
+            start = parse_iso_date(self.receipt_from_date_var.get())
+            end = parse_iso_date(self.receipt_to_date_var.get())
+            if start > end:
+                raise ValueError("시작일은 종료일보다 늦을 수 없습니다.")
+            download_dir_text = self.receipt_download_dir_var.get().strip()
+            if not download_dir_text:
+                raise ValueError("첨부파일 저장 폴더를 지정하세요.")
+            download_dir = Path(download_dir_text).expanduser()
+            username = self.receipt_naver_id_var.get().strip()
+            app_password = self.receipt_naver_password_var.get()
+            all_senders = bool(self.receipt_all_senders_var.get())
+            sender_filter = "" if all_senders else self.receipt_sender_var.get().strip()
+            if not all_senders and not sender_filter:
+                raise ValueError("발신자 검색어를 입력하세요.")
+        except Exception as exc:
+            messagebox.showerror("입력 확인", str(exc))
+            return
+
+        self._save_receipt_preferences()
+        self.receipt_running = True
+        self.receipt_status_var.set("메일 조회 중...")
+        self.receipt_search_button.configure(state="disabled")
+
+        def worker() -> None:
+            try:
+                items = search_naver_hwp_mail(
+                    username=username,
+                    app_password=app_password,
+                    start_date=start,
+                    end_date=end,
+                    sender_filter=sender_filter,
+                    download_dir=download_dir,
+                    log_cb=self.log,
+                )
+                self.after(0, lambda: self.receipt_status_var.set("접수 가능 문서 검사 중..."))
+                items = filter_receipt_candidate_documents(items, log_cb=self.log)
+                self._save_receipt_preferences(app_password=app_password)
+                apply_history(items, self.receipt_history)
+                self.receipt_checked_ids.clear()
+                self.receipt_items = {item.stable_id: item for item in items}
+                self.after(0, self._refresh_receipt_tree)
+                self.after(0, lambda: self.receipt_status_var.set(f"조회 완료: {len(items)}건"))
+                if not items:
+                    self.after(
+                        0,
+                        lambda: messagebox.showinfo(
+                            "조회 결과",
+                            "시행정보와 '접수 :' 칸이 모두 있는 HWP/HWPX/PDF 첨부파일이 없습니다.",
+                        ),
+                    )
+            except Exception as exc:
+                error_text = str(exc)
+                self.log(f"❌ 네이버 메일 조회 오류: {error_text}")
+                self.after(0, lambda text=error_text: messagebox.showerror("메일 조회 오류", text))
+                self.after(0, lambda: self.receipt_status_var.set("조회 오류"))
+            finally:
+                self.receipt_running = False
+                self.after(0, lambda: self.receipt_search_button.configure(state="normal"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def start_receipt_registration(self) -> None:
+        if self.receipt_running:
+            messagebox.showinfo("작업 중", "현재 접수대장 작업이 진행 중입니다.")
+            return
+        selected_ids = [
+            item_id
+            for item_id in self.receipt_tree.get_children()
+            if item_id in self.receipt_checked_ids
+        ]
+        if not selected_ids:
+            selected_ids = list(self.receipt_tree.selection())
+        if not selected_ids:
+            messagebox.showwarning(
+                "선택 필요",
+                "체크 열을 클릭·드래그하거나 Ctrl/Shift로 접수할 문서를 선택하세요.",
+            )
+            return
+        targets = [self.receipt_items[item_id] for item_id in selected_ids if item_id in self.receipt_items]
+        targets = [item for item in targets if item.status != "처리완료"]
+        targets = sort_receipt_items_oldest_first(targets)
+        if not targets:
+            messagebox.showinfo("처리 완료", "선택한 문서는 이미 처리되었습니다.")
+            return
+        self.log(
+            "접수 처리 순서: 오래된 수신일 우선 "
+            f"({targets[0].received_at:%Y.%m.%d %H:%M} → {targets[-1].received_at:%Y.%m.%d %H:%M}, "
+            f"총 {len(targets)}건)"
+        )
+        if not cdp_is_ready():
+            messagebox.showwarning("Chrome 미연결", "먼저 [Chrome 연결 열기] 버튼을 누르고 NMIS에 로그인하세요.")
+            return
+        self.receipt_running = True
+        self.receipt_status_var.set(f"접수 처리 중: 0/{len(targets)}")
+        self.receipt_run_button.configure(state="disabled")
+        output_dir = Path(self.receipt_download_dir_var.get()).expanduser() / "접수완료"
+
+        def worker() -> None:
+            completed = 0
+            failed = 0
+            try:
+                with sync_playwright() as pw:
+                    browser = pw.chromium.connect_over_cdp(CDP_URL)
+                    page = find_nmis_page(browser)
+                    for index, item in enumerate(targets, start=1):
+                        try:
+                            self.log(f"▶️ 접수 일괄처리 [{index}/{len(targets)}] 시작: {item.subject}")
+                            item.status = "시행정보 확인 중"
+                            self._update_receipt_row(item)
+                            metadata = extract_receipt_document_metadata(
+                                item.attachment_path,
+                                sender_address=item.sender_address,
+                                sender_display_name=item.sender_name,
+                                log_cb=self.log,
+                            )
+                            item.status = "NMIS 등록 중"
+                            self._update_receipt_row(item)
+                            result = register_receipt_document_on_nmis(
+                                page,
+                                item,
+                                metadata=metadata,
+                                save=True,
+                                log_cb=self.log,
+                            )
+                            item.receipt_no = str(result["receipt_no"])
+                            item.status = "결과 파일 저장 중"
+                            self._update_receipt_row(item)
+                            item.output_path = complete_registered_attachment(
+                                item.attachment_path,
+                                item.receipt_no,
+                                document_date=metadata.document_date,
+                                output_dir=output_dir,
+                                visible=False,
+                                log_cb=self.log,
+                            )
+                            self.receipt_history.record(item, item.receipt_no, item.output_path)
+                            item.status = "처리완료"
+                            self.receipt_checked_ids.discard(item.stable_id)
+                            completed += 1
+                            self.log(f"✅ 접수 일괄처리 [{index}/{len(targets)}] 완료: 접수번호 {item.receipt_no}")
+                            if index < len(targets) and item.attachment_path.suffix.lower() in {".hwp", ".hwpx"}:
+                                # 한글 외부 COM 서버가 Quit을 마치기 전에 다음 HWP를 열면
+                                # 두 번째 문서부터 RPC 서버 예외가 발생하므로 종료 완료를 기다린다.
+                                time.sleep(1.5)
+                        except Exception as exc:
+                            item.status = f"오류: {str(exc)[:80]}"
+                            failed += 1
+                            self.log(f"❌ 접수 처리 실패 [{item.subject}]: {exc}")
+                        finally:
+                            self._update_receipt_row(item)
+                            self.after(0, lambda i=index, total=len(targets): self.receipt_status_var.set(f"접수 처리 중: {i}/{total}"))
+            except Exception as exc:
+                failed += max(0, len(targets) - completed - failed)
+                self.log(f"❌ NMIS 브라우저 연결 오류: {exc}")
+            finally:
+                self.receipt_running = False
+                self.after(
+                    0,
+                    lambda ok=completed, error=failed, total=len(targets):
+                    self._show_receipt_batch_result(ok, error, total),
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ── 회비 및 가입금관리 월회비 입금 자동화 ──────────────────────────────
+
+    def _build_fee_tab(self, parent: ctk.CTkFrame) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)
+
+        file_card = ctk.CTkFrame(parent, fg_color="#18152E", border_color="#2E2756", border_width=1, corner_radius=14)
+        file_card.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        file_row = ctk.CTkFrame(file_card, fg_color="transparent")
+        file_row.pack(fill="x", padx=16, pady=12)
+        ctk.CTkLabel(
+            file_row,
+            text="1. 통장이체 정리 엑셀:",
+            font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"),
+            text_color="#E2E8F0",
+        ).pack(side="left", padx=(0, 8))
+        self.fee_excel_var = tk.StringVar(value=str(FEE_PAYMENT_SETTINGS.get("excel_path", "")))
+        ctk.CTkEntry(
+            file_row,
+            textvariable=self.fee_excel_var,
+            fg_color="#120F24",
+            border_color="#3B326B",
+        ).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(
+            file_row,
+            text="파일 선택",
+            width=90,
+            fg_color="#374151",
+            hover_color="#4B5563",
+            command=self._browse_fee_excel,
+        ).pack(side="left", padx=(0, 5))
+        ctk.CTkButton(
+            file_row,
+            text="불러오기",
+            width=90,
+            fg_color="#8B5CF6",
+            hover_color="#7C3AED",
+            command=self.load_fee_excel,
+        ).pack(side="left")
+
+        table_card = ctk.CTkFrame(parent, fg_color="#18152E", border_color="#2E2756", border_width=1, corner_radius=14)
+        table_card.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
+        table_card.grid_columnconfigure(0, weight=1)
+        table_card.grid_rowconfigure(1, weight=1)
+        toolbar = ctk.CTkFrame(table_card, fg_color="transparent")
+        toolbar.grid(row=0, column=0, sticky="ew", padx=14, pady=(10, 5))
+        ctk.CTkLabel(
+            toolbar,
+            text="📋 [2] 월회비 입금 대상",
+            font=ctk.CTkFont(family="맑은 고딕", size=13, weight="bold"),
+            text_color="#A855F7",
+        ).pack(side="left")
+        self.fee_selection_var = tk.StringVar(value="선택 0건")
+        ctk.CTkLabel(toolbar, textvariable=self.fee_selection_var, text_color="#10B981").pack(side="right", padx=(8, 0))
+        ctk.CTkButton(toolbar, text="전체 해제", width=72, height=26, fg_color="#374151", command=self._uncheck_all_fees).pack(side="right", padx=(6, 0))
+        ctk.CTkButton(toolbar, text="전체 선택", width=72, height=26, fg_color="#4C1D95", command=self._check_all_fees).pack(side="right", padx=(8, 0))
+
+        table_box = tk.Frame(table_card, bg="#18152E")
+        table_box.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 12))
+        table_box.grid_columnconfigure(0, weight=1)
+        table_box.grid_rowconfigure(0, weight=1)
+        fee_columns = ("checked", "row", "date", "name", "amount", "status", "detail")
+        self.fee_tree = ttk.Treeview(table_box, columns=fee_columns, show="headings", selectmode="extended", height=10)
+        fee_headings = {
+            "checked": ("선택", 48, "center"),
+            "row": ("엑셀행", 60, "center"),
+            "date": ("거래일자", 100, "center"),
+            "name": ("성명/상호", 150, "w"),
+            "amount": ("금액", 100, "e"),
+            "status": ("상태", 120, "center"),
+            "detail": ("안내", 260, "w"),
+        }
+        for column, (heading, width, anchor) in fee_headings.items():
+            self.fee_tree.heading(column, text=heading)
+            self.fee_tree.column(column, width=width, anchor=anchor)
+        fee_sy = ttk.Scrollbar(table_box, orient="vertical", command=self.fee_tree.yview)
+        fee_sx = ttk.Scrollbar(table_box, orient="horizontal", command=self.fee_tree.xview)
+        self.fee_tree.configure(yscrollcommand=fee_sy.set, xscrollcommand=fee_sx.set)
+        self.fee_tree.grid(row=0, column=0, sticky="nsew")
+        fee_sy.grid(row=0, column=1, sticky="ns")
+        fee_sx.grid(row=1, column=0, sticky="ew")
+        self.fee_tree.tag_configure("done", background="#163A2A")
+        self.fee_tree.tag_configure("missing", background="#3E381A")
+        self.fee_tree.tag_configure("error", background="#3E1A1A")
+        self.fee_tree.bind("<Button-1>", self._on_fee_tree_click, add="+")
+
+        run_card = ctk.CTkFrame(parent, fg_color="#18152E", border_color="#2E2756", border_width=1, corner_radius=14)
+        run_card.grid(row=2, column=0, sticky="ew")
+        run_row = ctk.CTkFrame(run_card, fg_color="transparent")
+        run_row.pack(fill="x", padx=16, pady=12)
+        self.fee_status_var = tk.StringVar(value="엑셀 파일을 불러오세요.")
+        ctk.CTkLabel(run_row, textvariable=self.fee_status_var, text_color="#94A3B8").pack(side="left")
+        self.fee_run_button = ctk.CTkButton(
+            run_row,
+            text="🚀 선택 월회비 자동입력",
+            width=190,
+            fg_color="#10B981",
+            hover_color="#059669",
+            command=self.start_fee_registration,
+        )
+        self.fee_run_button.pack(side="right")
+        self.fee_stop_button = ctk.CTkButton(
+            run_row,
+            text="⏹ 중지",
+            width=92,
+            state="disabled",
+            fg_color="#DC2626",
+            hover_color="#B91C1C",
+            command=self.request_fee_stop,
+        )
+        self.fee_stop_button.pack(side="right", padx=(0, 8))
+
+        if Path(self.fee_excel_var.get()).expanduser().is_file():
+            self.after(600, self.load_fee_excel)
+
+    def _browse_fee_excel(self) -> None:
+        selected = filedialog.askopenfilename(
+            title="통장이체 거래내역 정리 엑셀 선택",
+            filetypes=(("Excel 파일", "*.xlsx;*.xlsm"), ("모든 파일", "*.*")),
+        )
+        if selected:
+            self.fee_excel_var.set(selected)
+            self.load_fee_excel()
+
+    def load_fee_excel(self) -> None:
+        source = Path(self.fee_excel_var.get()).expanduser()
+        if not source.is_file():
+            messagebox.showerror("엑셀 오류", f"파일을 찾을 수 없습니다:\n{source}", parent=self)
+            return
+        try:
+            result = parse_fee_payment_excel(source)
+        except Exception as exc:
+            messagebox.showerror("엑셀 파싱 오류", str(exc), parent=self)
+            return
+        self.fee_items = {item.stable_id: item for item in result.items}
+        self.fee_checked_ids = set(self.fee_items)
+        FEE_PAYMENT_SETTINGS["excel_path"] = str(source.resolve())
+        save_settings()
+        self._refresh_fee_tree()
+        self.fee_status_var.set(f"{result.sheet_name} 시트: 입력 대상 {len(result.items)}건")
+        self.log(f"💳 월회비 엑셀 로드: {source.name} / 입력 대상 {len(result.items)}건")
+        for warning in result.skipped_rows:
+            self.log(f"⚠️ 회비 엑셀 제외: {warning}")
+
+    def _on_fee_tree_click(self, event) -> str | None:
+        if self.fee_tree.identify_region(event.x, event.y) != "cell":
+            return None
+        if self.fee_tree.identify_column(event.x) != "#1":
+            return None
+        item_id = self.fee_tree.identify_row(event.y)
+        if not item_id:
+            return "break"
+        if item_id in self.fee_checked_ids:
+            self.fee_checked_ids.discard(item_id)
+        else:
+            self.fee_checked_ids.add(item_id)
+        self.fee_tree.set(item_id, "checked", "☑" if item_id in self.fee_checked_ids else "☐")
+        self._update_fee_selection_status()
+        return "break"
+
+    def _check_all_fees(self) -> None:
+        self.fee_checked_ids = {
+            item_id for item_id, item in self.fee_items.items() if item.status != "처리완료"
+        }
+        self._refresh_fee_tree()
+
+    def _uncheck_all_fees(self) -> None:
+        self.fee_checked_ids.clear()
+        self._refresh_fee_tree()
+
+    def _update_fee_selection_status(self) -> None:
+        self.fee_selection_var.set(f"선택 {len(self.fee_checked_ids)}건 / 전체 {len(self.fee_items)}건")
+
+    def _refresh_fee_tree(self) -> None:
+        self.fee_checked_ids.intersection_update(self.fee_items)
+        for child in self.fee_tree.get_children():
+            self.fee_tree.delete(child)
+        for item_id, item in self.fee_items.items():
+            tag = "done" if item.status == "처리완료" else ("missing" if item.status == "월회비 행 없음" else ("error" if item.status.startswith("오류") else ""))
+            self.fee_tree.insert(
+                "",
+                "end",
+                iid=item_id,
+                values=(
+                    "☑" if item_id in self.fee_checked_ids else "☐",
+                    item.excel_row,
+                    item.payment_date.strftime("%Y-%m-%d"),
+                    item.member_name,
+                    f"{item.amount:,}",
+                    item.status,
+                    item.detail,
+                ),
+                tags=(tag,) if tag else (),
+            )
+        self._update_fee_selection_status()
+
+    def _update_fee_row(self, item: FeePaymentItem) -> None:
+        def update() -> None:
+            if not self.fee_tree.exists(item.stable_id):
+                return
+            tag = "done" if item.status == "처리완료" else ("missing" if item.status == "월회비 행 없음" else ("error" if item.status.startswith("오류") else ""))
+            self.fee_tree.item(
+                item.stable_id,
+                values=(
+                    "☑" if item.stable_id in self.fee_checked_ids else "☐",
+                    item.excel_row,
+                    item.payment_date.strftime("%Y-%m-%d"),
+                    item.member_name,
+                    f"{item.amount:,}",
+                    item.status,
+                    item.detail,
+                ),
+                tags=(tag,) if tag else (),
+            )
+            self._update_fee_selection_status()
+        self.after(0, update)
+
+    def _show_fee_batch_result(
+        self,
+        completed: int,
+        missing: list[FeePaymentItem],
+        failed: list[FeePaymentItem],
+        total: int,
+        stopped: bool = False,
+        remaining: int = 0,
+        setup_error: str = "",
+    ) -> None:
+        title = "월회비 입력 중단" if setup_error else ("월회비 입력 중지" if stopped else "월회비 입력 완료")
+        summary = f"{title}: 성공 {completed}건 / 월회비 행 없음 {len(missing)}건 / 실패 {len(failed)}건"
+        if stopped or setup_error:
+            summary += f" / 미처리 {remaining}건"
+        summary += f" / 전체 {total}건"
+        self.fee_status_var.set(summary)
+        self.fee_run_button.configure(state="normal")
+        self.fee_stop_button.configure(state="disabled")
+        details: list[str] = [summary]
+        if setup_error:
+            details.extend(("\n[시작 단계 오류]", setup_error))
+        if missing:
+            details.append("\n[월회비 행 없음]")
+            details.extend(
+                f"- 엑셀 {item.excel_row}행 {item.member_name} ({item.payment_date:%Y-%m-%d})"
+                for item in missing[:15]
+            )
+            if len(missing) > 15:
+                details.append(f"- 외 {len(missing) - 15}건 (목록 상태와 로그에서 확인)")
+        if failed:
+            details.append("\n[실패]")
+            details.extend(
+                f"- 엑셀 {item.excel_row}행 {item.member_name}: {item.detail}"
+                for item in failed[:10]
+            )
+        try:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+            self.attributes("-topmost", True)
+        except Exception:
+            pass
+        try:
+            message = "\n".join(details)
+            if stopped or setup_error or missing or failed:
+                messagebox.showwarning("월회비 자동입력 결과", message, parent=self)
+            else:
+                messagebox.showinfo("월회비 자동입력 결과", message, parent=self)
+        finally:
+            try:
+                self.attributes("-topmost", False)
+            except Exception:
+                pass
+
+    def request_fee_stop(self) -> None:
+        if not self.fee_running:
+            return
+        self.fee_stop_requested = True
+        self.fee_stop_button.configure(state="disabled")
+        self.fee_status_var.set("중지 요청됨 — 현재 항목 저장 완료 후 중지합니다.")
+        self.log("⏹ 월회비 자동입력 중지 요청: 현재 항목 완료 후 남은 작업을 중지합니다.")
+
+    def start_fee_registration(self) -> None:
+        if self.fee_running:
+            messagebox.showinfo("작업 중", "월회비 자동입력이 진행 중입니다.", parent=self)
+            return
+        targets = [
+            item
+            for item_id, item in self.fee_items.items()
+            if item_id in self.fee_checked_ids and item.status != "처리완료"
+        ]
+        targets.sort(key=lambda item: (item.payment_date, item.excel_row))
+        if not targets:
+            messagebox.showwarning("선택 필요", "자동입력할 거래를 하나 이상 선택하세요.", parent=self)
+            return
+        if not cdp_is_ready():
+            messagebox.showwarning("Chrome 미연결", "먼저 [Chrome 연결 열기] 버튼을 눌러 NMIS에 로그인하세요.", parent=self)
+            return
+
+        self.fee_running = True
+        self.fee_stop_requested = False
+        self.fee_run_button.configure(state="disabled")
+        self.fee_stop_button.configure(state="normal")
+        self.fee_status_var.set(f"월회비 처리 중: 0/{len(targets)}")
+
+        def worker() -> None:
+            completed = 0
+            missing: list[FeePaymentItem] = []
+            failed: list[FeePaymentItem] = []
+            stopped = False
+            setup_error = ""
+            try:
+                with sync_playwright() as pw:
+                    browser = pw.chromium.connect_over_cdp(CDP_URL)
+                    page = find_nmis_page(browser)
+                    if not page:
+                        raise RuntimeError("연결된 Chrome에서 NMIS 페이지를 찾지 못했습니다.")
+                    ensure_nmis_logged_in(page, NMIS_USER_ID, NMIS_PASSWORD, self.log)
+                    navigate_to_fee_management(page, self.log)
+                    for index, item in enumerate(targets, start=1):
+                        if self.fee_stop_requested:
+                            stopped = True
+                            self.log(
+                                f"⏹ 월회비 자동입력을 중지했습니다. "
+                                f"남은 미처리 항목: {len(targets) - index + 1}건"
+                            )
+                            break
+                        try:
+                            item.status = "NMIS 조회 중"
+                            item.detail = ""
+                            self._update_fee_row(item)
+                            self.log(
+                                f"▶️ 월회비 [{index}/{len(targets)}] {item.payment_date:%Y-%m-%d} "
+                                f"{item.member_name} {item.amount:,}원"
+                            )
+                            result = register_fee_payment_on_nmis(
+                                page,
+                                item,
+                                log_cb=self.log,
+                                user_id=NMIS_USER_ID,
+                                password=NMIS_PASSWORD,
+                            )
+                            if result.get("missing_month_fee"):
+                                item.status = "월회비 행 없음"
+                                item.detail = str(result.get("found", "조회 결과 없음"))
+                                missing.append(item)
+                            else:
+                                item.status = "처리완료"
+                                item.detail = "저장 완료"
+                                completed += 1
+                            self.fee_checked_ids.discard(item.stable_id)
+                        except Exception as exc:
+                            item.status = "오류"
+                            item.detail = str(exc)[:120]
+                            failed.append(item)
+                            self.log(f"❌ 월회비 입력 실패 [{item.member_name}]: {exc}")
+                        finally:
+                            self._update_fee_row(item)
+                            self.after(
+                                0,
+                                lambda current=index, total=len(targets):
+                                self.fee_status_var.set(f"월회비 처리 중: {current}/{total}"),
+                            )
+            except Exception as exc:
+                setup_error = str(exc)
+                remaining = [item for item in targets if item.status not in {"처리완료", "월회비 행 없음", "오류"}]
+                for item in remaining:
+                    item.status = "대기"
+                    item.detail = "시작 단계 중단 — 다시 실행 가능"
+                    self._update_fee_row(item)
+                self.log(f"❌ 월회비 자동입력 연결 오류: {exc}")
+            finally:
+                self.fee_running = False
+                processed = completed + len(missing) + len(failed)
+                remaining_count = max(0, len(targets) - processed)
+                if self.fee_stop_requested and remaining_count > 0:
+                    stopped = True
+                self.after(
+                    0,
+                    lambda ok=completed, no_row=list(missing), errors=list(failed), total=len(targets),
+                    was_stopped=stopped, remaining=remaining_count, start_error=setup_error:
+                    self._show_fee_batch_result(ok, no_row, errors, total, was_stopped, remaining, start_error),
+                )
+
         threading.Thread(target=worker, daemon=True).start()
 
     def open_settings(self) -> None:
