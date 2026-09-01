@@ -754,37 +754,38 @@ def get_active_macro_steps() -> list[dict[str, str]]:
     return [
         {
             "name": "1단계: 전표 저장/등록 버튼 클릭",
-            "selector": "span.button_icon[lang-code='create']:visible, button:has(span[lang-code='create']):visible, button[ng-click*='fnSave']:visible"
+            "selector": ".modal:visible button[ng-click*='fnSave']:visible"
         },
         {
             "name": "2단계: 1차 확인 팝업 (등록하시겠습니까)",
-            "selector": "button[ng-click*='fnConfirm']:visible, button[ng-key-mouse-down*='fnConfirm']:visible, button.btn-success[lang-code='ok']:visible"
+            "selector": ".modal:visible button[ng-click*='fnConfirm']:visible, .modal:visible button[ng-key-mouse-down*='fnConfirm']:visible, .modal:visible button.btn-success[lang-code='ok']:visible"
         },
         {
             "name": "3단계: 2차 완료 팝업 (등록되었습니다)",
-            "selector": "button[ng-click*='fnClose']:visible, button[ng-key-mouse-down*='fnClose']:visible, button:has(span[lang-code='ok']):visible"
+            "selector": ".modal:visible button[ng-click*='fnClose']:visible, .modal:visible button[ng-key-mouse-down*='fnClose']:visible, .modal:visible button:has(span[lang-code='ok']):visible"
         }
     ]
 
 
 def _click_step1_save_button(page: Page, log: Callable[[str], None]) -> bool:
+    # 전표관리 목록 뒤쪽의 '등록(fnGo)' 버튼도 :visible 로 잡힐 수 있으므로,
+    # 등록 모달 안의 저장 버튼(fnSave)을 반드시 우선한다.
     save_selectors = [
-        "span.button_icon[lang-code='create']:visible",
-        "span[lang-code='create']:visible",
-        "button:has(span[lang-code='create']):visible",
+        ".modal:visible button[ng-click*='fnSave']:visible",
         "button[ng-click*='fnSave']:visible",
+        ".modal:visible button:has(span.button_icon[lang-code='create']):visible",
     ]
     deadline = time.monotonic() + 8.0
     while time.monotonic() < deadline:
         for sel in save_selectors:
             loc = page.locator(sel)
             if loc.count() > 0:
-                for k in range(loc.count()):
+                for k in range(loc.count() - 1, -1, -1):
                     target = loc.nth(k)
                     if target.is_visible():
                         try:
                             target.click(force=True)
-                            log("  └─ [1단계 완료] '전표 저장/등록' (<span lang-code='create'>) 버튼 클릭 성공")
+                            log("  └─ [1단계 완료] 전표 등록창의 '등록(fnSave)' 버튼 클릭 성공")
                             page.wait_for_timeout(350)
                             return True
                         except Exception:
@@ -792,20 +793,19 @@ def _click_step1_save_button(page: Page, log: Callable[[str], None]) -> bool:
         try:
             js_code = """
                 (function() {
-                    var span = document.querySelector("span[lang-code='create']") || document.querySelector("button[ng-click*='fnSave']");
-                    if (span && (span.offsetWidth > 0 || span.offsetHeight > 0 || span.getClientRects().length > 0)) {
-                        try { span.click(); } catch(e){}
-                        var btn = span.closest('button') || span;
-                        try { btn.click(); } catch(e){}
-                        try { btn.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true})); } catch(e){}
-                        try { btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})); } catch(e){}
+                    var candidates = Array.from(document.querySelectorAll("button[ng-click*='fnSave']"));
+                    var btn = candidates.reverse().find(function(el) {
+                        return el && (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0);
+                    });
+                    if (btn) {
+                        btn.click();
                         return true;
                     }
                     return false;
                 })()
             """
             if page.evaluate(js_code):
-                log("  └─ [1단계 완료] '전표 저장/등록' JS 3중 강제 클릭 발사 성공")
+                log("  └─ [1단계 완료] 전표 등록창의 '등록(fnSave)' JS 클릭 성공")
                 page.wait_for_timeout(350)
                 return True
         except Exception:
@@ -819,7 +819,10 @@ def _save_and_confirm(page: Page, log: Callable[[str], None]) -> None:
     log(f"설정된 총 {len(steps)}단계 실행 순서에 맞춰 입력을 진행합니다.")
 
     # 1단계: 전표 저장/등록 버튼 무조건 선행 강제 클릭
-    _click_step1_save_button(page, log)
+    if not _click_step1_save_button(page, log):
+        raise RuntimeError(
+            "전표 입력은 완료했지만 등록창의 '등록(fnSave)' 버튼을 찾거나 클릭하지 못했습니다."
+        )
 
     # 2단계 이후 (팝업 확인들) 순차 처리
     for i, step in enumerate(steps, 1):
@@ -890,7 +893,7 @@ def _save_and_confirm(page: Page, log: Callable[[str], None]) -> None:
             time.sleep(0.15)
 
         if not clicked:
-            log(f"  └─ [{i}단계 통과] 요소가 없거나 이미 진행됨")
+            raise RuntimeError(f"{step_name} 버튼을 찾거나 클릭하지 못했습니다.")
 
     page.wait_for_timeout(400)
     log("모든 설정 단계 실행 완료")
@@ -993,10 +996,9 @@ def execute_manual_step1(
     )
 
     save_selectors = [
-        "span.button_icon[lang-code='create']:visible",
-        "span[lang-code='create']:visible",
-        "button:has(span[lang-code='create']):visible",
+        ".modal:visible button[ng-click*='fnSave']:visible",
         "button[ng-click*='fnSave']:visible",
+        ".modal:visible button:has(span.button_icon[lang-code='create']):visible",
     ]
     for sel in save_selectors:
         loc = page.locator(sel)
@@ -1005,11 +1007,20 @@ def execute_manual_step1(
             log("  └─ [1단계 수동 완료] 전표 작성 완료 및 저장/등록 버튼 클릭 성공!")
             return
 
-    page.evaluate("""
-        var span = document.querySelector("span[lang-code='create']");
-        if (span) { span.click(); var b = span.closest('button')||span; b.click(); }
+    clicked = page.evaluate("""
+        (function() {
+            var buttons = Array.from(document.querySelectorAll("button[ng-click*='fnSave']"));
+            var button = buttons.reverse().find(function(el) {
+                return el && (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0);
+            });
+            if (!button) return false;
+            button.click();
+            return true;
+        })()
     """)
-    log("  └─ [1단계 수동 완료] 전표 작성 완료 및 JS 등록 클릭 성공!")
+    if not clicked:
+        raise RuntimeError("전표 등록창의 '등록(fnSave)' 버튼을 찾지 못했습니다.")
+    log("  └─ [1단계 수동 완료] 전표 등록창의 등록 버튼 JS 클릭 성공!")
 
 
 def execute_manual_step2(page: Page, log: Callable[[str], None]) -> None:

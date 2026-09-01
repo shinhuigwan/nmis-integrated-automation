@@ -5,6 +5,8 @@ from unittest.mock import patch
 
 from nmis_slip_automation import (
     Transaction,
+    _click_step1_save_button,
+    _save_and_confirm,
     classify_transaction_type,
     describe_slip_settings,
     parse_excel,
@@ -162,6 +164,29 @@ class SlipExcelCompatibilityTests(unittest.TestCase):
         settings = suggest_slip_settings(transaction, "기타")
 
         self.assertFalse(slip_settings_ready(transaction, settings))
+
+    def test_slip_save_click_prefers_modal_fnsave_button(self):
+        page = unittest.mock.MagicMock()
+        save_button = unittest.mock.MagicMock()
+        save_button.is_visible.return_value = True
+        save_locator = unittest.mock.MagicMock()
+        save_locator.count.return_value = 1
+        save_locator.nth.return_value = save_button
+        page.locator.return_value = save_locator
+
+        clicked = _click_step1_save_button(page, lambda _message: None)
+
+        self.assertTrue(clicked)
+        first_selector = page.locator.call_args_list[0].args[0]
+        self.assertIn(".modal:visible", first_selector)
+        self.assertIn("fnSave", first_selector)
+        save_button.click.assert_called_once_with(force=True)
+
+    def test_save_flow_stops_when_modal_register_button_is_missing(self):
+        page = unittest.mock.MagicMock()
+        with patch("nmis_slip_automation._click_step1_save_button", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "등록창의 '등록\\(fnSave\\)'"):
+                _save_and_confirm(page, lambda _message: None)
 
 
 if __name__ == "__main__":
