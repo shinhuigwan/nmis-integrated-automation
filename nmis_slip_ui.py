@@ -28,6 +28,7 @@ from playwright.sync_api import sync_playwright
 CDP_URL = "http://127.0.0.1:9222"
 
 from nmis_slip_automation import (
+    ACCOUNT_CODES,
     MemberVerificationResult,
     Transaction,
     classify_transaction_type,
@@ -1090,8 +1091,39 @@ class ModernSlipUI(ctk.CTk):
         combo = ctk.CTkComboBox(f_type, values=["member_fee", "join_fee", "salary", "기타"], variable=type_var)
         combo.pack(side="left", fill="x", expand=True)
 
-        add_entry("계정코드", account_code_var)
-        add_entry("계정명", account_name_var)
+        account_options = ["직접 입력"] + [
+            f"{code} | {name}" for code, name in ACCOUNT_CODES.items()
+        ]
+
+        def selected_account_option() -> str:
+            code = account_code_var.get().strip()
+            name = account_name_var.get().strip() or ACCOUNT_CODES.get(code, "")
+            option = f"{code} | {name}" if code and name else "직접 입력"
+            return option if option in account_options else "직접 입력"
+
+        account_choice_var = tk.StringVar(value=selected_account_option())
+
+        def apply_account_choice(choice: str) -> None:
+            if choice == "직접 입력":
+                return
+            code, _, name = choice.partition("|")
+            account_code_var.set(code.strip())
+            account_name_var.set(name.strip())
+
+        account_row = ctk.CTkFrame(body, fg_color="transparent")
+        account_row.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(account_row, text="계정과목 선택", width=135, anchor="w").pack(side="left")
+        account_combo = ctk.CTkComboBox(
+            account_row,
+            values=account_options,
+            variable=account_choice_var,
+            command=apply_account_choice,
+            state="readonly",
+        )
+        account_combo.pack(side="left", fill="x", expand=True)
+
+        add_entry("선택된 계정코드", account_code_var)
+        add_entry("선택된 계정명", account_name_var)
         add_entry("적요", brief_var)
 
         ctk.CTkLabel(
@@ -1135,6 +1167,7 @@ class ModernSlipUI(ctk.CTk):
             defaults = suggest_slip_settings(tx, type_var.get())
             account_code_var.set(str(defaults.get("account_code") or ""))
             account_name_var.set(str(defaults.get("account_name") or ""))
+            account_choice_var.set(selected_account_option())
             brief_var.set(str(defaults.get("brief") or ""))
             cms_count_var.set(str(defaults.get("cms_count") or ""))
             cms_fee_var.set(str(defaults.get("cms_fee") or ""))
@@ -1150,10 +1183,15 @@ class ModernSlipUI(ctk.CTk):
                     and tx.memo.strip().upper() == "CMS"
                 )
                 mode = "salary_bundle" if selected_type == "salary" else ("cms_bundle" if is_cms else "single")
+                selected_account_code = account_code_var.get().strip()
+                selected_account_name = (
+                    account_name_var.get().strip()
+                    or ACCOUNT_CODES.get(selected_account_code, "")
+                )
                 new_settings: dict[str, object] = {
                     "mode": mode,
-                    "account_code": account_code_var.get().strip(),
-                    "account_name": account_name_var.get().strip(),
+                    "account_code": selected_account_code,
+                    "account_name": selected_account_name,
                     "brief": brief_var.get().strip(),
                     "cms_count": parse_money(cms_count_var.get(), "CMS 건수"),
                     "cms_fee": parse_money(cms_fee_var.get(), "CMS 수수료"),
