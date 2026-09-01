@@ -999,6 +999,9 @@ class ModernSlipUI(ctk.CTk):
             settings = self.tx_settings.get(raw_id) or suggest_slip_settings(tx, t_type)
             self.tx_settings[raw_id] = settings
             acct_disp = describe_slip_settings(tx, settings)
+            slip_type_label = str(
+                settings.get("slip_type_label") or tx.slip_type_label
+            )
 
             if not slip_settings_ready(tx, settings):
                 tag = "warn"
@@ -1012,7 +1015,7 @@ class ModernSlipUI(ctk.CTk):
                 values=(
                     tx.date_str,
                     t_type_korean,
-                    tx.direction,
+                    slip_type_label.replace("전표", ""),
                     f"{tx.amount:,}",
                     tx.content,
                     acct_disp,
@@ -1069,6 +1072,9 @@ class ModernSlipUI(ctk.CTk):
         body.pack(fill="both", expand=True, padx=16, pady=(0, 10))
 
         type_var = tk.StringVar(value=curr_type)
+        slip_type_var = tk.StringVar(
+            value=str(current.get("slip_type_label") or tx.slip_type_label)
+        )
         account_code_var = tk.StringVar(value=str(current.get("account_code") or ""))
         account_name_var = tk.StringVar(value=str(current.get("account_name") or ""))
         brief_var = tk.StringVar(value=str(current.get("brief") or ""))
@@ -1090,6 +1096,16 @@ class ModernSlipUI(ctk.CTk):
 
         combo = ctk.CTkComboBox(f_type, values=["member_fee", "join_fee", "salary", "기타"], variable=type_var)
         combo.pack(side="left", fill="x", expand=True)
+
+        slip_type_row = ctk.CTkFrame(body, fg_color="transparent")
+        slip_type_row.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(slip_type_row, text="전표구분", width=135, anchor="w").pack(side="left")
+        ctk.CTkComboBox(
+            slip_type_row,
+            values=["입금전표", "출금전표", "대체전표"],
+            variable=slip_type_var,
+            state="readonly",
+        ).pack(side="left", fill="x", expand=True)
 
         account_options = ["직접 입력"] + [
             f"{code} | {name}" for code, name in ACCOUNT_CODES.items()
@@ -1173,6 +1189,7 @@ class ModernSlipUI(ctk.CTk):
             cms_fee_var.set(str(defaults.get("cms_fee") or ""))
             basic_pay_var.set(str(defaults.get("basic_pay") or ""))
             bonus_pay_var.set(str(defaults.get("bonus_pay") or ""))
+            slip_type_var.set(str(defaults.get("slip_type_label") or tx.slip_type_label))
 
         def save_and_close() -> None:
             try:
@@ -1182,7 +1199,11 @@ class ModernSlipUI(ctk.CTk):
                     and tx.account_code == "5141"
                     and tx.memo.strip().upper() == "CMS"
                 )
-                mode = "salary_bundle" if selected_type == "salary" else ("cms_bundle" if is_cms else "single")
+                selected_slip_type = slip_type_var.get()
+                if selected_slip_type == "대체전표":
+                    mode = "single"
+                else:
+                    mode = "salary_bundle" if selected_type == "salary" else ("cms_bundle" if is_cms else "single")
                 selected_account_code = account_code_var.get().strip()
                 selected_account_name = (
                     account_name_var.get().strip()
@@ -1190,6 +1211,7 @@ class ModernSlipUI(ctk.CTk):
                 )
                 new_settings: dict[str, object] = {
                     "mode": mode,
+                    "slip_type_label": selected_slip_type,
                     "account_code": selected_account_code,
                     "account_name": selected_account_name,
                     "brief": brief_var.get().strip(),
@@ -1330,12 +1352,15 @@ class ModernSlipUI(ctk.CTk):
                 "기타": "기타",
             }.get(t_type, t_type)
             settings = self.tx_settings.get(item_id) or suggest_slip_settings(tx, t_type)
+            slip_type_label = str(
+                settings.get("slip_type_label") or tx.slip_type_label
+            )
             self.tree.item(
                 item_id,
                 values=(
                     tx.date_str,
                     type_label,
-                    tx.direction,
+                    slip_type_label.replace("전표", ""),
                     f"{tx.amount:,.0f}",
                     tx.content,
                     describe_slip_settings(tx, settings),

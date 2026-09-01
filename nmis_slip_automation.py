@@ -361,6 +361,7 @@ def suggest_slip_settings(transaction: Transaction, transaction_type: str) -> di
     brief = transaction.content.strip() or transaction.memo.strip() or transaction.note.strip()
     settings: dict[str, object] = {
         "mode": "single",
+        "slip_type_label": transaction.slip_type_label,
         "account_code": "",
         "account_name": "",
         "brief": brief,
@@ -417,7 +418,12 @@ def slip_settings_ready(transaction: Transaction, settings: Mapping[str, object]
         basic = int(settings.get("basic_pay") or 0)
         bonus = int(settings.get("bonus_pay") or 0)
         return basic >= 0 and bonus >= 0 and basic + bonus == int(round(transaction.amount))
-    return bool(str(settings.get("account_code") or "").strip())
+    slip_type_label = str(settings.get("slip_type_label") or transaction.slip_type_label)
+    account_code = str(settings.get("account_code") or "").strip()
+    return (
+        slip_type_label in {"입금전표", "출금전표", "대체전표"}
+        and account_code.isdigit()
+    )
 
 
 def describe_slip_settings(transaction: Transaction, settings: Mapping[str, object]) -> str:
@@ -762,7 +768,7 @@ def get_active_macro_steps() -> list[dict[str, str]]:
         },
         {
             "name": "3단계: 2차 완료 팝업 (등록되었습니다)",
-            "selector": ".modal:visible button[ng-click*='fnClose']:visible, .modal:visible button[ng-key-mouse-down*='fnClose']:visible, .modal:visible button:has(span[lang-code='ok']):visible"
+            "selector": ".modal:visible button[ng-click*='fnClose']:visible, button[ng-click*='fnClose']:visible, .modal:visible button[ng-key-mouse-down*='fnClose']:visible, button[ng-key-mouse-down*='fnClose']:visible, button:has(span[lang-code='ok']):visible"
         }
     ]
 
@@ -824,10 +830,15 @@ def _save_and_confirm(page: Page, log: Callable[[str], None]) -> None:
             "전표 입력은 완료했지만 등록창의 '등록(fnSave)' 버튼을 찾거나 클릭하지 못했습니다."
         )
 
+    completion_closed_by_enter = False
+
     # 2단계 이후 (팝업 확인들) 순차 처리
     for i, step in enumerate(steps, 1):
         if i == 1:
             continue  # 1단계는 위에서 처리 완료됨
+        if i == 3 and completion_closed_by_enter:
+            log("  └─ [3단계 완료] 등록 완료 팝업을 Enter 키로 닫았습니다.")
+            continue
 
         step_name = step.get("name", f"{i}단계")
         selector = step.get("selector", "").strip()
@@ -894,6 +905,29 @@ def _save_and_confirm(page: Page, log: Callable[[str], None]) -> None:
 
         if not clicked:
             raise RuntimeError(f"{step_name} 버튼을 찾거나 클릭하지 못했습니다.")
+
+        if i == 2:
+            # '등록하시겠습니까' 확인 후 나타나는 완료 알림은 일반 modal 바깥에서
+            # 렌더링되기도 한다. 0.5초 후 Enter를 보내고, 남아 있으면 3단계에서
+            # fnClose 버튼을 직접 클릭한다.
+            page.wait_for_timeout(500)
+            completion_button = page.locator(
+                "button[ng-click*='fnClose']:visible, "
+                "button[ng-key-mouse-down*='fnClose']:visible, "
+                "button:has(span[lang-code='ok']):visible"
+            )
+            completion_notice = page.get_by_text("등록되었습니다", exact=False)
+            was_visible = (
+                completion_button.count() > 0
+                or completion_notice.count() > 0
+            )
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(300)
+            completion_closed_by_enter = was_visible and (
+                completion_button.count() == 0
+                and completion_notice.count() == 0
+            )
+            log("  └─ [완료 알림 처리] 1차 확인 0.5초 후 Enter 키 입력")
 
     page.wait_for_timeout(400)
     log("모든 설정 단계 실행 완료")
@@ -1256,7 +1290,7 @@ def register_single_slip_on_page(
     log: Callable[[str], None] | None = None,
 ) -> None:
     write_log = log or print
-    if slip_type_label == "입금전표":
+    if slip_type_label in {"입금전표", "대체전표"}:
         acct_field, acct_name_field = "crAcctCode", "crAcctName"
     else:
         acct_field, acct_name_field = "drAcctCode", "drAcctName"
@@ -1319,10 +1353,13 @@ def register_transaction_on_nmis(
 
     account_code = str(settings.get("account_code") or "").strip()
     brief = str(settings.get("brief") or "").strip() or transaction.content.strip()
+    slip_type_label = str(
+        settings.get("slip_type_label") or transaction.slip_type_label
+    )
     register_single_slip_on_page(
         page=page,
         tx=transaction,
-        slip_type_label=transaction.slip_type_label,
+        slip_type_label=slip_type_label,
         account_code=account_code,
         brief=brief,
         amount=int(round(transaction.amount)),

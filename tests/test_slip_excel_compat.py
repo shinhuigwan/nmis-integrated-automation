@@ -10,6 +10,8 @@ from nmis_slip_automation import (
     classify_transaction_type,
     describe_slip_settings,
     parse_excel,
+    register_single_slip_on_page,
+    register_transaction_on_nmis,
     slip_settings_ready,
     suggest_slip_settings,
     transaction_date_range,
@@ -164,6 +166,38 @@ class SlipExcelCompatibilityTests(unittest.TestCase):
         settings = suggest_slip_settings(transaction, "기타")
 
         self.assertFalse(slip_settings_ready(transaction, settings))
+
+    def test_substitute_slip_uses_credit_account_field(self):
+        transaction = Transaction(7, datetime(2026, 9, 1), "대체", 1000, None, "", "")
+        with (
+            patch("nmis_slip_automation._open_slip_modal"),
+            patch("nmis_slip_automation._fill_slip") as fill_slip,
+            patch("nmis_slip_automation._save_and_confirm"),
+        ):
+            register_single_slip_on_page(
+                page=unittest.mock.MagicMock(),
+                tx=transaction,
+                slip_type_label="대체전표",
+                account_code="4359",
+                brief="대체 여비",
+                amount=1000,
+            )
+
+        self.assertEqual(fill_slip.call_args.kwargs["slip_type_label"], "대체전표")
+        self.assertEqual(fill_slip.call_args.kwargs["account_field"], "crAcctCode")
+        self.assertEqual(fill_slip.call_args.kwargs["account_name_field"], "crAcctName")
+
+    def test_transaction_registration_uses_configured_substitute_type(self):
+        transaction = Transaction(8, datetime(2026, 9, 1), "대체", 1000, None, "", "")
+        settings = suggest_slip_settings(transaction, "기타")
+        settings.update(account_code="4359", account_name="여비", slip_type_label="대체전표")
+
+        with patch("nmis_slip_automation.register_single_slip_on_page") as register_single:
+            register_transaction_on_nmis(
+                unittest.mock.MagicMock(), transaction, "기타", settings
+            )
+
+        self.assertEqual(register_single.call_args.kwargs["slip_type_label"], "대체전표")
 
     def test_slip_save_click_prefers_modal_fnsave_button(self):
         page = unittest.mock.MagicMock()
