@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -8,7 +9,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping
 
 import xlrd
 import xlutils
@@ -29,6 +30,20 @@ def get_worksheet_by_keyword(wb_com, keyword: str):
 
 
 SITE_URL = "http://nmis.foodservice.or.kr/"
+
+ACCOUNT_CODES = {
+    "5102": "가입금",
+    "5141": "회비",
+    "4326": "기본급",
+    "4337": "복리후생비",
+    "4349": "수도광열비",
+    "4359": "여비",
+    "4380": "임원활동비",
+    "4385": "잡비",
+    "4396": "중앙(지회)회비",
+    "4403": "직책수당및직무급",
+    "4408": "통신운반비",
+}
 
 SELECTORS = {
     "from_date": "input[name='fromDate']:visible",
@@ -64,6 +79,21 @@ class Transaction:
     cms_count_hint: int | None = None
     cms_dues_hint: int | None = None
     cms_fee_hint: int | None = None
+
+    @property
+    def raw_id(self) -> str:
+        """UI Treeview에서 거래를 안정적으로 식별하는 고유 문자열."""
+        return f"tx-{self.source_row}-{self.transacted_at:%Y%m%d%H%M%S}"
+
+    @property
+    def date_str(self) -> str:
+        """전표 목록에 표시할 거래일시."""
+        return self.transacted_at.strftime("%Y-%m-%d %H:%M:%S")
+
+    @property
+    def direction(self) -> str:
+        """전표 목록의 입출금 구분 표시값."""
+        return "출금" if self.withdrawal is not None and self.withdrawal > 0 else "입금"
 
     @property
     def slip_type_label(self) -> str:
@@ -277,6 +307,215 @@ def read_excel(path: Path) -> tuple[date, date, list[Transaction]]:
 
     transactions.sort(key=lambda item: (item.transacted_at, -item.source_row))
     return period[0], period[1], transactions
+
+
+def parse_excel(path: Path) -> list[Transaction]:
+    """통합 UI용 호환 함수: 거래내역 엑셀에서 거래 목록만 반환한다."""
+    _start_date, _end_date, transactions = read_excel(path)
+    return transactions
+
+
+def transaction_date_range(transactions: Iterable[Transaction]) -> tuple[date, date]:
+    """거래 목록에서 가장 빠른 날짜와 가장 늦은 날짜를 반환한다."""
+    items = list(transactions)
+    if not items:
+        raise ValueError("전표일자 범위를 계산할 거래가 없습니다.")
+    dates = [item.transacted_at.date() for item in items]
+    return min(dates), max(dates)
+
+
+def classify_transaction_type(
+    transaction: Transaction,
+    keyword_rules: Mapping[str, str],
+) -> str:
+    """CMS 규칙과 사용자 키워드로 UI 전표유형을 자동 판정한다."""
+    if transaction.account_code == "5141" and transaction.memo.strip().upper() == "CMS":
+        return "member_fee"
+
+    searchable = " ".join(
+        (transaction.content, transaction.memo, transaction.note)
+    ).casefold()
+    if transaction.direction == "입금" and "직접수금" in searchable:
+        return "member_fee"
+    for keyword, mapped_type in keyword_rules.items():
+        normalized_keyword = str(keyword or "").strip().casefold()
+        if normalized_keyword and normalized_keyword in searchable:
+            return mapped_type
+    return "기타"
+
+
+GENERAL_ACCOUNT_RULES = (
+    (("티앤비소프트",), "4385"),
+    (("kt", "lgu", "통신요금", "메시징"), "4408"),
+    (("4대보험", "복리후생"), "4337"),
+    (("전기료", "수도료", "가스료", "수도광열"), "4349"),
+    (("임원활동비", "발전협의금"), "4380"),
+    (("중앙회비",), "4396"),
+    (("여비",), "4359"),
+)
+
+
+def suggest_slip_settings(transaction: Transaction, transaction_type: str) -> dict[str, object]:
+    """기존 NMIS 계정 규칙을 이용해 거래별 자동등록 설정을 만든다."""
+    total_amount = int(round(transaction.amount))
+    brief = transaction.content.strip() or transaction.memo.strip() or transaction.note.strip()
+    settings: dict[str, object] = {
+        "mode": "single",
+        "account_code": "",
+        "account_name": "",
+        "brief": brief,
+        "cms_count": int(transaction.cms_count_hint or 0),
+        "cms_fee": int(transaction.cms_fee_hint or 0),
+        "basic_pay": 0,
+        "bonus_pay": 0,
+        "basic_account": "4326",
+        "bonus_account": "4403",
+    }
+
+    if transaction_type == "member_fee":
+        settings.update(account_code="5141", account_name="회비")
+        if transaction.account_code == "5141" and transaction.memo.strip().upper() == "CMS":
+            settings["mode"] = "cms_bundle"
+            count = int(settings["cms_count"])
+            settings["brief"] = f"CMS {count}건 회비" if count > 0 else "CMS (건수 설정 필요)"
+        return settings
+
+    if transaction_type == "join_fee":
+        settings.update(account_code="5102", account_name="가입금")
+        return settings
+
+    if transaction_type == "salary":
+        basic_pay = min(total_amount, 860_000)
+        settings.update(
+            mode="salary_bundle",
+            account_code="4326 + 4403",
+            account_name="기본급 + 직책수당및직무급",
+            brief="기본급 + 상여및직무급",
+            basic_pay=basic_pay,
+            bonus_pay=max(0, total_amount - basic_pay),
+        )
+        return settings
+
+    searchable = " ".join(
+        (transaction.content, transaction.memo, transaction.note)
+    ).casefold()
+    for keywords, account_code in GENERAL_ACCOUNT_RULES:
+        if any(keyword.casefold() in searchable for keyword in keywords):
+            settings.update(
+                account_code=account_code,
+                account_name=ACCOUNT_CODES[account_code],
+            )
+            break
+    return settings
+
+
+def slip_settings_ready(transaction: Transaction, settings: Mapping[str, object]) -> bool:
+    mode = str(settings.get("mode") or "single")
+    if mode == "cms_bundle":
+        return int(settings.get("cms_count") or 0) > 0 and int(settings.get("cms_fee") or 0) > 0
+    if mode == "salary_bundle":
+        basic = int(settings.get("basic_pay") or 0)
+        bonus = int(settings.get("bonus_pay") or 0)
+        return basic >= 0 and bonus >= 0 and basic + bonus == int(round(transaction.amount))
+    return bool(str(settings.get("account_code") or "").strip())
+
+
+def describe_slip_settings(transaction: Transaction, settings: Mapping[str, object]) -> str:
+    mode = str(settings.get("mode") or "single")
+    if mode == "cms_bundle":
+        count = int(settings.get("cms_count") or 0)
+        fee = int(settings.get("cms_fee") or 0)
+        suffix = f"CMS {count}건 / 수수료 {fee:,}원" if count and fee else "CMS 건수·수수료 설정 필요"
+        return f"5141 회비 + 4385 잡비 ({suffix})"
+    if mode == "salary_bundle":
+        basic = int(settings.get("basic_pay") or 0)
+        bonus = int(settings.get("bonus_pay") or 0)
+        return f"4326 기본급 {basic:,} + 4403 직무급 {bonus:,}"
+    code = str(settings.get("account_code") or "").strip()
+    name = str(settings.get("account_name") or "").strip()
+    return f"{code} {name}".strip() if code else "계정코드 설정 필요"
+
+
+def _slip_management_ready(page: Page) -> bool:
+    return (
+        page.locator("input[name='fromDate']:visible").count() > 0
+        and page.locator("input[name='toDate']:visible").count() > 0
+        and page.locator("#accountinvoiceprocesslist.selected").count() > 0
+    )
+
+
+def navigate_to_slip_management(
+    page: Page,
+    log_cb: Callable[[str], None] | None = None,
+) -> None:
+    """회계 > 전표관리(account/invoice/process/list) 화면으로 자동 이동한다."""
+    log = log_cb or (lambda _message: None)
+    if page.locator(SELECTORS["slip_create_title"]).count() > 0 or _slip_management_ready(page):
+        return
+    log("NMIS 메뉴 이동: 회계 > 전표관리")
+    try:
+        route_result = page.evaluate(
+            """() => {
+                const roots = [document.querySelector('[ng-app]'), document.body, document.documentElement].filter(Boolean);
+                for (const root of roots) {
+                    try {
+                        const injector = window.angular && angular.element(root).injector();
+                        if (!injector || !injector.has('$state')) continue;
+                        const state = injector.get('$state');
+                        const route = state.get().map(item => item && item.name).find(name => name === 'account/invoice/process/list');
+                        if (!route) return {route: '', error: 'exact slip route not found'};
+                        state.go(route);
+                        return {route};
+                    } catch (_) {}
+                }
+                return {route: '', error: 'Angular state service not found'};
+            }"""
+        )
+        if route_result and route_result.get("route"):
+            page.locator("input[name='fromDate']:visible").first.wait_for(state="visible", timeout=15_000)
+            page.locator("input[name='toDate']:visible").first.wait_for(state="visible", timeout=15_000)
+            log("NMIS 전표관리 화면 이동 완료")
+            return
+    except Exception as exc:
+        log(f"전표관리 내부 경로 이동 실패 — 메뉴 클릭으로 전환합니다: {exc}")
+
+    top_menu = page.get_by_role("link", name="회계", exact=True)
+    if top_menu.count() == 0:
+        raise RuntimeError("NMIS 상단의 '회계' 메뉴를 찾지 못했습니다.")
+    top_menu.first.click(force=True)
+    submenu = page.locator("#accountinvoiceprocesslist")
+    submenu.first.wait_for(state="attached", timeout=15_000)
+    submenu.first.click(force=True)
+    page.locator("input[name='fromDate']:visible").first.wait_for(state="visible", timeout=15_000)
+    log("NMIS 전표관리 화면 이동 완료")
+
+
+def set_slip_search_date_range(
+    page: Page,
+    start_date: date,
+    end_date: date,
+    log_cb: Callable[[str], None] | None = None,
+) -> None:
+    """전표관리 조회기간을 설정하고 조회한다."""
+    log = log_cb or (lambda _message: None)
+    from_input = page.locator("input[name='fromDate']:visible").first
+    to_input = page.locator("input[name='toDate']:visible").first
+    from_input.fill(start_date.strftime("%Y%m%d"))
+    from_input.press("Tab")
+    page.wait_for_timeout(300)
+    to_input.fill(end_date.strftime("%Y%m%d"))
+    to_input.press("Tab")
+    page.wait_for_timeout(300)
+    form = from_input.locator("xpath=ancestor::form[1]")
+    search = form.locator(
+        "button:has(span.button_icon[lang-code='search']):visible, "
+        "button[ng-click*='fnSearch']:visible"
+    )
+    if search.count() == 0:
+        raise RuntimeError("전표관리 조회 버튼을 찾지 못했습니다.")
+    search.first.click(force=True)
+    page.wait_for_timeout(800)
+    log(f"전표관리 조회기간 설정: {start_date:%Y-%m-%d} ~ {end_date:%Y-%m-%d}")
 
 
 def parse_cli_date(value: str) -> date:
@@ -1025,6 +1264,85 @@ def register_single_slip_on_page(
     )
     _save_and_confirm(page, write_log)
     write_log(f"등록 완료: {slip_type_label} / {account_code} / {brief} / {amount:,}원")
+
+
+def register_transaction_on_nmis(
+    page: Page,
+    transaction: Transaction,
+    transaction_type: str,
+    settings: Mapping[str, object],
+    log_cb: Callable[[str], None] | None = None,
+) -> None:
+    """검증된 유형·계정 설정으로 거래 한 건을 NMIS에 등록한다."""
+    log = log_cb or (lambda _message: None)
+    if not slip_settings_ready(transaction, settings):
+        raise RuntimeError(
+            "전표 자동등록 설정이 부족합니다. 목록에서 해당 행을 더블클릭해 "
+            "계정코드 또는 CMS/급여 세부값을 확인하세요."
+        )
+
+    mode = str(settings.get("mode") or "single")
+    if mode == "cms_bundle":
+        plan = CmsBundlePlan(
+            transaction=transaction,
+            cms_count=int(settings.get("cms_count") or 0),
+            fee_amount=int(settings.get("cms_fee") or 0),
+        )
+        register_cms_bundle_on_page(page, plan, log)
+        return
+
+    if mode == "salary_bundle":
+        plan = SalaryBundlePlan(
+            transaction=transaction,
+            basic_pay=int(settings.get("basic_pay") or 0),
+            basic_acct=str(settings.get("basic_account") or "4326"),
+            bonus_pay=int(settings.get("bonus_pay") or 0),
+            bonus_acct=str(settings.get("bonus_account") or "4403"),
+        )
+        if plan.total_amount != int(round(transaction.amount)):
+            raise RuntimeError(
+                f"급여 분할 합계({plan.total_amount:,}원)가 거래금액({transaction.amount:,.0f}원)과 다릅니다."
+            )
+        register_salary_bundle_on_page(page, plan, log)
+        return
+
+    account_code = str(settings.get("account_code") or "").strip()
+    brief = str(settings.get("brief") or "").strip() or transaction.content.strip()
+    register_single_slip_on_page(
+        page=page,
+        tx=transaction,
+        slip_type_label=transaction.slip_type_label,
+        account_code=account_code,
+        brief=brief,
+        amount=int(round(transaction.amount)),
+        log=log,
+    )
+
+
+def register_transactions(
+    page: Page,
+    transactions: Iterable[Transaction],
+    transaction_types: Mapping[str, str],
+    log_cb: Callable[[str], None] | None = None,
+    settings_by_id: Mapping[str, Mapping[str, object]] | None = None,
+) -> dict[str, object]:
+    """통합 UI가 호출하는 전표 연속등록 호환 함수."""
+    log = log_cb or (lambda _message: None)
+    items = list(transactions)
+    if not items:
+        return {"success": True, "completed": 0}
+    navigate_to_slip_management(page, log)
+    completed = 0
+    for transaction in items:
+        transaction_type = transaction_types.get(transaction.raw_id, "기타")
+        settings = (
+            settings_by_id.get(transaction.raw_id)
+            if settings_by_id and transaction.raw_id in settings_by_id
+            else suggest_slip_settings(transaction, transaction_type)
+        )
+        register_transaction_on_nmis(page, transaction, transaction_type, settings, log)
+        completed += 1
+    return {"success": True, "completed": completed}
 
 
 def show_preview(transactions: Iterable[Transaction]) -> None:

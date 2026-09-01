@@ -30,6 +30,8 @@ CDP_URL = "http://127.0.0.1:9222"
 from nmis_slip_automation import (
     MemberVerificationResult,
     Transaction,
+    classify_transaction_type,
+    describe_slip_settings,
     fetch_sheet4_data_only,
     fill_all_monthly_reports_sequentially,
     fill_member_status_from_nmis,
@@ -37,13 +39,20 @@ from nmis_slip_automation import (
     fill_monthly_report_from_nmis,
     fill_staff_join_excel_from_data,
     find_nmis_page,
+    navigate_to_slip_management,
     register_ship_documents_on_nmis,
     verify_member_info_from_nmis,
     register_potential_members_on_nmis,
+    register_transactions,
+    parse_excel,
     parse_rrn_birth_gender,
     resolve_column_from_letter_or_name,
     format_korean_phone,
     format_digits_only,
+    set_slip_search_date_range,
+    slip_settings_ready,
+    suggest_slip_settings,
+    transaction_date_range,
 )
 from receipt_register import (
     ReceiptHistory,
@@ -952,17 +961,23 @@ class ModernSlipUI(ctk.CTk):
             messagebox.showerror("엑셀 파싱 오류", f"엑셀을 읽는 데 실패했습니다:\n{e}")
             return
 
+        if txs:
+            earliest_date, latest_date = transaction_date_range(txs)
+            self.from_date_var.set(earliest_date.isoformat())
+            self.to_date_var.set(latest_date.isoformat())
+            self.log(
+                f"전표일자 범위 자동 설정: {earliest_date:%Y-%m-%d} ~ "
+                f"{latest_date:%Y-%m-%d}"
+            )
+
         self.all_transactions = {tx.raw_id: tx for tx in txs}
         self.tx_type.clear()
         self.tx_settings.clear()
 
         for tx in txs:
-            t_type = "기타"
-            for kw, mapped_type in KEYWORD_RULES.items():
-                if kw in tx.content:
-                    t_type = mapped_type
-                    break
-            self.tx_type[tx.raw_id] = t_type
+            transaction_type = classify_transaction_type(tx, KEYWORD_RULES)
+            self.tx_type[tx.raw_id] = transaction_type
+            self.tx_settings[tx.raw_id] = suggest_slip_settings(tx, transaction_type)
 
         self._refresh_tree()
         self.log(f"엑셀 파일 불러오기 완료: {p.name} (총 {len(txs)}건)")
@@ -980,13 +995,14 @@ class ModernSlipUI(ctk.CTk):
                 "기타": "기타",
             }.get(t_type, t_type)
 
-            acct_disp = "-"
-            if t_type in ("member_fee", "join_fee"):
-                acct_disp = "회비/가입금 자동"
-            elif t_type == "salary":
-                acct_disp = "인건비 자동"
+            settings = self.tx_settings.get(raw_id) or suggest_slip_settings(tx, t_type)
+            self.tx_settings[raw_id] = settings
+            acct_disp = describe_slip_settings(tx, settings)
 
-            tag = "cms" if t_type in ("member_fee", "join_fee") else ("salary" if t_type == "salary" else "")
+            if not slip_settings_ready(tx, settings):
+                tag = "warn"
+            else:
+                tag = "cms" if t_type in ("member_fee", "join_fee") else ("salary" if t_type == "salary" else "")
 
             self.tree.insert(
                 "",
@@ -999,7 +1015,7 @@ class ModernSlipUI(ctk.CTk):
                     f"{tx.amount:,}",
                     tx.content,
                     acct_disp,
-                    "대기",
+                    "대기" if slip_settings_ready(tx, settings) else "설정 필요",
                 ),
                 tags=(tag,) if tag else (),
             )
@@ -1025,31 +1041,161 @@ class ModernSlipUI(ctk.CTk):
     def _open_edit_dialog(self, item_id: str) -> None:
         tx = self.all_transactions[item_id]
         curr_type = self.tx_type.get(item_id, "기타")
+        current = dict(
+            self.tx_settings.get(item_id)
+            or suggest_slip_settings(tx, curr_type)
+        )
 
         dlg = ctk.CTkToplevel(self)
         dlg.title(f"거래 설정 — {tx.content}")
-        dlg.geometry("400x300")
+        dlg.geometry("560x670")
+        dlg.minsize(520, 620)
         dlg.grab_set()
 
-        ctk.CTkLabel(dlg, text=f"📌 {tx.date_str} | {tx.direction} | {tx.amount:,}원", font=ctk.CTkFont(family="맑은 고딕", size=13, weight="bold")).pack(pady=12)
-        ctk.CTkLabel(dlg, text=f"내용: {tx.content}", font=ctk.CTkFont(family="맑은 고딕", size=11)).pack(pady=(0, 12))
+        ctk.CTkLabel(
+            dlg,
+            text=f"📌 {tx.date_str} | {tx.direction} | {tx.amount:,.0f}원",
+            font=ctk.CTkFont(family="맑은 고딕", size=13, weight="bold"),
+        ).pack(pady=(14, 4))
+        ctk.CTkLabel(
+            dlg,
+            text=f"내용: {tx.content} / 적요: {tx.memo or '-'}",
+            font=ctk.CTkFont(family="맑은 고딕", size=11),
+            wraplength=510,
+        ).pack(padx=20, pady=(0, 10))
+
+        body = ctk.CTkScrollableFrame(dlg, fg_color="#18152E")
+        body.pack(fill="both", expand=True, padx=16, pady=(0, 10))
 
         type_var = tk.StringVar(value=curr_type)
+        account_code_var = tk.StringVar(value=str(current.get("account_code") or ""))
+        account_name_var = tk.StringVar(value=str(current.get("account_name") or ""))
+        brief_var = tk.StringVar(value=str(current.get("brief") or ""))
+        cms_count_var = tk.StringVar(value=str(current.get("cms_count") or ""))
+        cms_fee_var = tk.StringVar(value=str(current.get("cms_fee") or ""))
+        basic_pay_var = tk.StringVar(value=str(current.get("basic_pay") or ""))
+        bonus_pay_var = tk.StringVar(value=str(current.get("bonus_pay") or ""))
 
-        f_type = ctk.CTkFrame(dlg, fg_color="transparent")
-        f_type.pack(fill="x", padx=20, pady=8)
+        def add_entry(label: str, variable: tk.StringVar) -> None:
+            row = ctk.CTkFrame(body, fg_color="transparent")
+            row.pack(fill="x", padx=10, pady=5)
+            ctk.CTkLabel(row, text=label, width=135, anchor="w").pack(side="left")
+            ctk.CTkEntry(row, textvariable=variable).pack(side="left", fill="x", expand=True)
 
-        ctk.CTkLabel(f_type, text="전표 유형:", font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold")).pack(side="left", padx=(0, 10))
+        f_type = ctk.CTkFrame(body, fg_color="transparent")
+        f_type.pack(fill="x", padx=10, pady=5)
+
+        ctk.CTkLabel(f_type, text="전표 유형", width=135, anchor="w").pack(side="left")
 
         combo = ctk.CTkComboBox(f_type, values=["member_fee", "join_fee", "salary", "기타"], variable=type_var)
         combo.pack(side="left", fill="x", expand=True)
 
-        def save_and_close():
-            self.tx_type[item_id] = type_var.get()
+        add_entry("계정코드", account_code_var)
+        add_entry("계정명", account_name_var)
+        add_entry("적요", brief_var)
+
+        ctk.CTkLabel(
+            body,
+            text="CMS 중앙회 입금 설정 (5141 회비 + 4385 잡비)",
+            text_color="#A855F7",
+            anchor="w",
+        ).pack(fill="x", padx=10, pady=(14, 2))
+        add_entry("CMS 건수", cms_count_var)
+        add_entry("CMS 수수료", cms_fee_var)
+
+        ctk.CTkLabel(
+            body,
+            text="급여 분할 설정 (4326 기본급 + 4403 직책수당및직무급)",
+            text_color="#10B981",
+            anchor="w",
+        ).pack(fill="x", padx=10, pady=(14, 2))
+        add_entry("기본급", basic_pay_var)
+        add_entry("직무급/상여", bonus_pay_var)
+
+        ctk.CTkLabel(
+            body,
+            text=(
+                "CMS 거래는 건수와 수수료가 모두 필요합니다.\n"
+                "급여는 기본급과 직무급/상여의 합계가 거래금액과 같아야 합니다."
+            ),
+            justify="left",
+            text_color="#FBBF24",
+        ).pack(fill="x", padx=10, pady=12)
+
+        def parse_money(value: str, field_name: str) -> int:
+            cleaned = value.replace(",", "").replace("원", "").strip()
+            if not cleaned:
+                return 0
+            try:
+                return int(cleaned)
+            except ValueError as exc:
+                raise ValueError(f"{field_name}에는 숫자만 입력하세요.") from exc
+
+        def apply_type_defaults() -> None:
+            defaults = suggest_slip_settings(tx, type_var.get())
+            account_code_var.set(str(defaults.get("account_code") or ""))
+            account_name_var.set(str(defaults.get("account_name") or ""))
+            brief_var.set(str(defaults.get("brief") or ""))
+            cms_count_var.set(str(defaults.get("cms_count") or ""))
+            cms_fee_var.set(str(defaults.get("cms_fee") or ""))
+            basic_pay_var.set(str(defaults.get("basic_pay") or ""))
+            bonus_pay_var.set(str(defaults.get("bonus_pay") or ""))
+
+        def save_and_close() -> None:
+            try:
+                selected_type = type_var.get()
+                is_cms = (
+                    selected_type == "member_fee"
+                    and tx.account_code == "5141"
+                    and tx.memo.strip().upper() == "CMS"
+                )
+                mode = "salary_bundle" if selected_type == "salary" else ("cms_bundle" if is_cms else "single")
+                new_settings: dict[str, object] = {
+                    "mode": mode,
+                    "account_code": account_code_var.get().strip(),
+                    "account_name": account_name_var.get().strip(),
+                    "brief": brief_var.get().strip(),
+                    "cms_count": parse_money(cms_count_var.get(), "CMS 건수"),
+                    "cms_fee": parse_money(cms_fee_var.get(), "CMS 수수료"),
+                    "basic_pay": parse_money(basic_pay_var.get(), "기본급"),
+                    "bonus_pay": parse_money(bonus_pay_var.get(), "직무급/상여"),
+                    "basic_account": "4326",
+                    "bonus_account": "4403",
+                }
+            except ValueError as exc:
+                messagebox.showwarning("설정 확인", str(exc), parent=dlg)
+                return
+
+            if not slip_settings_ready(tx, new_settings):
+                messagebox.showwarning(
+                    "설정 확인",
+                    "자동등록에 필요한 값이 부족하거나 합계가 맞지 않습니다.\n"
+                    "계정코드, CMS 건수·수수료 또는 급여 분할금액을 확인하세요.",
+                    parent=dlg,
+                )
+                return
+
+            self.tx_type[item_id] = selected_type
+            self.tx_settings[item_id] = new_settings
             self._refresh_tree()
             dlg.destroy()
 
-        ctk.CTkButton(dlg, text="저장 및 적용", fg_color="#10B981", hover_color="#059669", command=save_and_close).pack(pady=20)
+        footer = ctk.CTkFrame(dlg, fg_color="transparent")
+        footer.pack(fill="x", padx=16, pady=(0, 14))
+        ctk.CTkButton(
+            footer,
+            text="유형 기본값 적용",
+            fg_color="#374151",
+            hover_color="#4B5563",
+            command=apply_type_defaults,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            footer,
+            text="저장 및 적용",
+            fg_color="#10B981",
+            hover_color="#059669",
+            command=save_and_close,
+        ).pack(side="right")
 
     def delete_selected(self, event: tk.Event = None) -> None:
         selected = self.tree.selection()
@@ -1060,6 +1206,7 @@ class ModernSlipUI(ctk.CTk):
                 del self.all_transactions[iid]
             if iid in self.tx_type:
                 del self.tx_type[iid]
+            self.tx_settings.pop(iid, None)
             self.tree.delete(iid)
         self.log(f"선택한 {len(selected)}건 거래 삭제 완료.")
 
@@ -1105,13 +1252,65 @@ class ModernSlipUI(ctk.CTk):
     def _run_batch_worker(self, target_txs: list[Transaction], mode: str) -> None:
         if not target_txs:
             return
+        missing = [
+            tx for tx in target_txs
+            if not slip_settings_ready(
+                tx,
+                self.tx_settings.get(tx.raw_id)
+                or suggest_slip_settings(tx, self.tx_type.get(tx.raw_id, "기타")),
+            )
+        ]
+        if missing:
+            first = missing[0]
+            if self.tree.exists(first.raw_id):
+                self.tree.selection_set(first.raw_id)
+                self.tree.focus(first.raw_id)
+                self.tree.see(first.raw_id)
+            sample = "\n".join(f"- {tx.date_str[:10]} {tx.content}" for tx in missing[:5])
+            more = f"\n외 {len(missing) - 5}건" if len(missing) > 5 else ""
+            messagebox.showwarning(
+                "전표 설정 필요",
+                f"자동등록 설정이 필요한 거래가 {len(missing)}건 있습니다.\n"
+                f"해당 행을 더블클릭하여 설정한 뒤 다시 실행하세요.\n\n{sample}{more}",
+            )
+            return
         if not cdp_is_ready():
             messagebox.showwarning("Chrome 미연결", "먼저 [Chrome 연결 열기] 버튼을 눌러 Chrome을 연결하세요.")
             return
 
+        start_date, end_date = transaction_date_range(target_txs)
+
+        def update_row(item_id: str, status: str, tag: str) -> None:
+            tx = self.all_transactions.get(item_id)
+            if not tx or not self.tree.exists(item_id):
+                return
+            t_type = self.tx_type.get(item_id, "기타")
+            type_label = {
+                "member_fee": "회비",
+                "join_fee": "가입금",
+                "salary": "급여/상여",
+                "기타": "기타",
+            }.get(t_type, t_type)
+            settings = self.tx_settings.get(item_id) or suggest_slip_settings(tx, t_type)
+            self.tree.item(
+                item_id,
+                values=(
+                    tx.date_str,
+                    type_label,
+                    tx.direction,
+                    f"{tx.amount:,.0f}",
+                    tx.content,
+                    describe_slip_settings(tx, settings),
+                    status,
+                ),
+                tags=(tag,),
+            )
+
         def worker():
             self.running = True
-            self.run_status_var.set("⚡ 전표 등록 진행 중...")
+            self.after(0, lambda: self.run_status_var.set("⚡ 전표 등록 진행 중..."))
+            success_count = 0
+            failure_count = 0
             try:
                 with sync_playwright() as pw:
                     browser = pw.chromium.connect_over_cdp(CDP_URL)
@@ -1120,18 +1319,42 @@ class ModernSlipUI(ctk.CTk):
                         self.log("페이지를 찾지 못했습니다.")
                         return
 
+                    navigate_to_slip_management(page, self.log)
+                    set_slip_search_date_range(page, start_date, end_date, self.log)
+
                     for tx in target_txs:
                         t_type = self.tx_type.get(tx.raw_id, "기타")
-                        res = register_transactions(page, [tx], {tx.raw_id: t_type}, self.log)
-                        if res.get("success", False):
-                            self.after(0, lambda i=tx.raw_id: self.tree.item(i, values=(
-                                tx.date_str, t_type, tx.direction, f"{tx.amount:,}", tx.content, "자동", "✅ 완료"
-                            ), tags=("done",)))
+                        self.after(0, lambda i=tx.raw_id: update_row(i, "처리 중", ""))
+                        try:
+                            res = register_transactions(
+                                page,
+                                [tx],
+                                {tx.raw_id: t_type},
+                                self.log,
+                                settings_by_id=self.tx_settings,
+                            )
+                            if res.get("success", False):
+                                success_count += 1
+                                self.after(0, lambda i=tx.raw_id: update_row(i, "✅ 완료", "done"))
+                        except Exception as exc:
+                            failure_count += 1
+                            self.log(f"❌ 전표 등록 실패 [{tx.content}]: {exc}")
+                            self.after(0, lambda i=tx.raw_id: update_row(i, "❌ 오류", "error"))
             except Exception as e:
                 self.log(f"오류 발생: {e}")
             finally:
                 self.running = False
-                self.run_status_var.set("대기")
+                self.after(0, lambda: self.run_status_var.set("대기"))
+                self.log(
+                    f"전표 연속등록 종료: 성공 {success_count}건 / 실패 {failure_count}건"
+                )
+                self.after(
+                    0,
+                    lambda: messagebox.showinfo(
+                        "전표 자동등록 결과",
+                        f"작업이 끝났습니다.\n성공 {success_count}건 / 실패 {failure_count}건",
+                    ),
+                )
 
         threading.Thread(target=worker, daemon=True).start()
 
