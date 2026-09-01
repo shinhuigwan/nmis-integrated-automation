@@ -83,6 +83,20 @@
 
 ## 📦 다운로드 및 설치 방법 (Installation)
 
+### Windows 원클릭 자동 설치 (추천)
+
+저장소를 ZIP으로 내려받아 압축을 푼 뒤 **`설치하기.bat`**를 더블클릭합니다. 한글 파일명이 깨지는 환경에서는 동일한 설치 파일인 **`install.bat`**를 실행하면 됩니다.
+
+설치 파일이 다음 작업을 자동으로 수행합니다.
+
+* Python 3.10 이상이 없으면 Python 3.12 설치
+* Google Chrome이 없으면 Chrome 설치
+* 프로젝트 전용 `.venv` 가상환경 생성
+* `requirements.txt`의 Python 패키지 전체 설치 및 검증
+* 바탕화면에 **`통합 자동화 시스템`** 바로가기 생성
+
+Microsoft Excel과 한컴오피스 한글은 유료 프로그램이므로 자동 설치 대상이 아닙니다. 월보고/Excel COM 기능에는 Microsoft Excel, HWP 접수번호 입력에는 한컴오피스 한글이 각각 설치되어 있어야 합니다. 네이버 메일 앱 비밀번호는 Windows 사용자별 DPAPI로 암호화되므로 새 PC에서 한 번 다시 입력해야 합니다.
+
 ### 1. Repository 클론 및 폴더 이동
 ```bash
 git clone https://github.com/shinhuigwan/nmis-integrated-automation.git "통합 자동화 시스템"
