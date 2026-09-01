@@ -167,7 +167,7 @@ class SlipExcelCompatibilityTests(unittest.TestCase):
 
         self.assertFalse(slip_settings_ready(transaction, settings))
 
-    def test_substitute_slip_uses_credit_account_field(self):
+    def test_substitute_slip_uses_editable_dr_account_field(self):
         transaction = Transaction(7, datetime(2026, 9, 1), "대체", 1000, None, "", "")
         with (
             patch("nmis_slip_automation._open_slip_modal"),
@@ -184,8 +184,8 @@ class SlipExcelCompatibilityTests(unittest.TestCase):
             )
 
         self.assertEqual(fill_slip.call_args.kwargs["slip_type_label"], "대체전표")
-        self.assertEqual(fill_slip.call_args.kwargs["account_field"], "crAcctCode")
-        self.assertEqual(fill_slip.call_args.kwargs["account_name_field"], "crAcctName")
+        self.assertEqual(fill_slip.call_args.kwargs["account_field"], "drAcctCode")
+        self.assertEqual(fill_slip.call_args.kwargs["account_name_field"], "drAcctName")
 
     def test_transaction_registration_uses_configured_substitute_type(self):
         transaction = Transaction(8, datetime(2026, 9, 1), "대체", 1000, None, "", "")

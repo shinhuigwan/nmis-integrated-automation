@@ -1290,9 +1290,11 @@ def register_single_slip_on_page(
     log: Callable[[str], None] | None = None,
 ) -> None:
     write_log = log or print
-    if slip_type_label in {"입금전표", "대체전표"}:
+    if slip_type_label == "입금전표":
         acct_field, acct_name_field = "crAcctCode", "crAcctName"
     else:
+        # NMIS의 출금전표와 대체전표는 대변계정 입력란이 drAcctCode이다.
+        # 대체전표의 crAcctCode는 readonly라서 입력하면 타임아웃이 발생한다.
         acct_field, acct_name_field = "drAcctCode", "drAcctName"
     _open_slip_modal(page, write_log)
     _fill_slip(
