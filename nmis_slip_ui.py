@@ -76,6 +76,7 @@ from membership_fee_register import (
     parse_fee_payment_excel,
     register_fee_payment_on_nmis,
 )
+from pdf_date_editor import default_output_path, replace_pdf_date_label
 
 def find_chrome() -> Path | None:
     candidates = (
@@ -307,7 +308,7 @@ class ModernSlipUI(ctk.CTk):
     def _build_sidebar(self) -> None:
         self.sidebar = ctk.CTkFrame(self, width=220, corner_radius=0, fg_color="#141126")
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(8, weight=1)
+        self.sidebar.grid_rowconfigure(9, weight=1)
 
         # 로고
         logo_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
@@ -404,9 +405,22 @@ class ModernSlipUI(ctk.CTk):
         )
         self.btn_tab_fee.grid(row=6, column=0, padx=16, pady=6, sticky="ew")
 
+        self.btn_tab_pdf = ctk.CTkButton(
+            self.sidebar,
+            text="📄 PDF 일자수정",
+            font=ctk.CTkFont(family="맑은 고딕", size=13, weight="bold"),
+            fg_color="transparent",
+            hover_color="#26214A",
+            text_color="#CBD5E1",
+            height=42,
+            corner_radius=10,
+            command=lambda: self._select_tab("pdf"),
+        )
+        self.btn_tab_pdf.grid(row=7, column=0, padx=16, pady=6, sticky="ew")
+
         # Chrome Status Box in Sidebar
         status_box = ctk.CTkFrame(self.sidebar, fg_color="#1E1B3A", corner_radius=12)
-        status_box.grid(row=7, column=0, padx=16, pady=16, sticky="ew")
+        status_box.grid(row=8, column=0, padx=16, pady=16, sticky="ew")
 
         ctk.CTkLabel(
             status_box,
@@ -466,6 +480,7 @@ class ModernSlipUI(ctk.CTk):
         self.tab_potential_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
         self.tab_receipt_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
         self.tab_fee_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        self.tab_pdf_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
 
         self._build_monthly_tab(self.tab_monthly_frame)
         self._build_slip_tab(self.tab_slip_frame)
@@ -473,6 +488,7 @@ class ModernSlipUI(ctk.CTk):
         self._build_potential_tab(self.tab_potential_frame)
         self._build_receipt_tab(self.tab_receipt_frame)
         self._build_fee_tab(self.tab_fee_frame)
+        self._build_pdf_tab(self.tab_pdf_frame)
 
         # 초기 탭 표시 (월보고 자동 연동)
         self._select_tab("monthly")
@@ -487,6 +503,7 @@ class ModernSlipUI(ctk.CTk):
         self.tab_potential_frame.grid_forget()
         self.tab_receipt_frame.grid_forget()
         self.tab_fee_frame.grid_forget()
+        self.tab_pdf_frame.grid_forget()
 
         self.btn_tab_monthly.configure(fg_color="transparent", text_color="#CBD5E1")
         self.btn_tab_slip.configure(fg_color="transparent", text_color="#CBD5E1")
@@ -494,6 +511,7 @@ class ModernSlipUI(ctk.CTk):
         self.btn_tab_potential.configure(fg_color="transparent", text_color="#CBD5E1")
         self.btn_tab_receipt.configure(fg_color="transparent", text_color="#CBD5E1")
         self.btn_tab_fee.configure(fg_color="transparent", text_color="#CBD5E1")
+        self.btn_tab_pdf.configure(fg_color="transparent", text_color="#CBD5E1")
 
         if tab_name == "monthly":
             self.tab_monthly_frame.grid(row=1, column=0, padx=24, pady=10, sticky="nsew")
@@ -519,6 +537,10 @@ class ModernSlipUI(ctk.CTk):
             self.tab_fee_frame.grid(row=1, column=0, padx=24, pady=10, sticky="nsew")
             self.btn_tab_fee.configure(fg_color="#8B5CF6", text_color="#FFFFFF")
             self.main_title_label.configure(text="💳 엑셀 → NMIS 월회비 입금등록")
+        elif tab_name == "pdf":
+            self.tab_pdf_frame.grid(row=1, column=0, padx=24, pady=10, sticky="nsew")
+            self.btn_tab_pdf.configure(fg_color="#8B5CF6", text_color="#FFFFFF")
+            self.main_title_label.configure(text="📄 PDF DATE 일자수정")
 
     # ── [탭 2] 월보고 자동 연동 뷰 ──────────────────────────────────────────
 
@@ -1537,6 +1559,192 @@ class ModernSlipUI(ctk.CTk):
             with sync_playwright() as pw:
                 page = find_nmis_page(pw.chromium.connect_over_cdp(CDP_URL))
                 register_ship_documents_on_nmis(page, send_date=send_date, report_month_label=month_label, only_first_doc=only_first_doc, log_cb=self.log)
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ── PDF DATE 일자수정 ───────────────────────────────────────────────────
+
+    def _build_pdf_tab(self, parent: ctk.CTkFrame) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)
+
+        self.pdf_input_var = tk.StringVar()
+        self.pdf_output_var = tk.StringVar()
+        self.pdf_date_value_var = tk.StringVar(
+            value=datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        )
+        self.pdf_date_status_var = tk.StringVar(value="대기")
+
+        card = ctk.CTkFrame(
+            parent,
+            fg_color="#18152E",
+            border_color="#2E2756",
+            border_width=1,
+            corner_radius=14,
+        )
+        card.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+
+        ctk.CTkLabel(
+            card,
+            text="PDF 우측 상단 DATE: 값 수정",
+            font=ctk.CTkFont(family="맑은 고딕", size=16, weight="bold"),
+            text_color="#A855F7",
+        ).pack(anchor="w", padx=20, pady=(18, 6))
+        ctk.CTkLabel(
+            card,
+            text=(
+                "UbiReport PDF의 DATE: 뒤 날짜·시간만 바꾼 복사본을 만듭니다. "
+                "중앙 전표일자와 원본 파일은 변경하지 않습니다."
+            ),
+            font=ctk.CTkFont(family="맑은 고딕", size=11),
+            text_color="#94A3B8",
+            wraplength=760,
+            justify="left",
+        ).pack(anchor="w", padx=20, pady=(0, 16))
+
+        def add_path_row(label: str, variable: tk.StringVar, command, button_text: str) -> None:
+            row = ctk.CTkFrame(card, fg_color="transparent")
+            row.pack(fill="x", padx=20, pady=6)
+            ctk.CTkLabel(row, text=label, width=105, anchor="w").pack(side="left")
+            ctk.CTkEntry(
+                row,
+                textvariable=variable,
+                fg_color="#120F24",
+                border_color="#3B326B",
+            ).pack(side="left", fill="x", expand=True, padx=(0, 8))
+            ctk.CTkButton(
+                row,
+                text=button_text,
+                width=90,
+                fg_color="#374151",
+                hover_color="#4B5563",
+                command=command,
+            ).pack(side="left")
+
+        def browse_input() -> None:
+            selected = filedialog.askopenfilename(
+                title="DATE 값을 수정할 PDF 선택",
+                filetypes=(("PDF 파일", "*.pdf"), ("모든 파일", "*.*")),
+            )
+            if selected:
+                source = Path(selected)
+                self.pdf_input_var.set(str(source))
+                self.pdf_output_var.set(str(default_output_path(source)))
+
+        def browse_output() -> None:
+            source = Path(self.pdf_input_var.get().strip()) if self.pdf_input_var.get().strip() else None
+            initial_name = default_output_path(source).name if source else "DATE수정.pdf"
+            selected = filedialog.asksaveasfilename(
+                title="수정된 PDF 저장 위치",
+                defaultextension=".pdf",
+                initialfile=initial_name,
+                filetypes=(("PDF 파일", "*.pdf"),),
+            )
+            if selected:
+                self.pdf_output_var.set(selected)
+
+        add_path_row("원본 PDF", self.pdf_input_var, browse_input, "파일 선택")
+        add_path_row("저장 PDF", self.pdf_output_var, browse_output, "저장 위치")
+
+        date_row = ctk.CTkFrame(card, fg_color="transparent")
+        date_row.pack(fill="x", padx=20, pady=(10, 8))
+        ctk.CTkLabel(date_row, text="새 DATE 값", width=105, anchor="w").pack(side="left")
+        ctk.CTkEntry(
+            date_row,
+            textvariable=self.pdf_date_value_var,
+            width=220,
+            fg_color="#120F24",
+            border_color="#3B326B",
+        ).pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(
+            date_row,
+            text="예: 2026-09-01 14:30",
+            text_color="#94A3B8",
+        ).pack(side="left")
+
+        action_row = ctk.CTkFrame(card, fg_color="transparent")
+        action_row.pack(fill="x", padx=20, pady=(8, 18))
+        ctk.CTkLabel(
+            action_row,
+            textvariable=self.pdf_date_status_var,
+            text_color="#10B981",
+        ).pack(side="left")
+        ctk.CTkButton(
+            action_row,
+            text="DATE 수정본 저장",
+            width=170,
+            height=38,
+            fg_color="#10B981",
+            hover_color="#059669",
+            command=self.start_pdf_date_edit,
+        ).pack(side="right")
+
+        guide = ctk.CTkFrame(
+            parent,
+            fg_color="#18152E",
+            border_color="#2E2756",
+            border_width=1,
+            corner_radius=14,
+        )
+        guide.grid(row=1, column=0, sticky="new")
+        ctk.CTkLabel(
+            guide,
+            text="처리 방식",
+            font=ctk.CTkFont(family="맑은 고딕", size=14, weight="bold"),
+            text_color="#CBD5E1",
+        ).pack(anchor="w", padx=20, pady=(16, 8))
+        ctk.CTkLabel(
+            guide,
+            text=(
+                "1. 각 페이지에서 DATE: 라벨과 기존 날짜를 자동 탐지합니다.\n"
+                "2. 기존 날짜 영역만 지우고 새 날짜를 같은 위치에 입력합니다.\n"
+                "3. 원본과 페이지 수를 보존한 새 PDF를 저장합니다."
+            ),
+            justify="left",
+            text_color="#94A3B8",
+        ).pack(anchor="w", padx=20, pady=(0, 16))
+
+    def start_pdf_date_edit(self) -> None:
+        source = Path(self.pdf_input_var.get().strip()).expanduser()
+        if not source.is_file():
+            messagebox.showerror("PDF 파일 오류", "원본 PDF 파일을 선택하세요.", parent=self)
+            return
+        output_text = self.pdf_output_var.get().strip()
+        destination = Path(output_text).expanduser() if output_text else default_output_path(source)
+        self.pdf_output_var.set(str(destination))
+        new_value = self.pdf_date_value_var.get().strip()
+        self.pdf_date_status_var.set("처리 중...")
+
+        def worker() -> None:
+            try:
+                result = replace_pdf_date_label(source, destination, new_value)
+                pages = ", ".join(str(page) for page in result.changed_pages)
+                old_values = ", ".join(result.old_values)
+                self.log(
+                    f"PDF DATE 수정 완료: {old_values} → {result.new_value} "
+                    f"/ 페이지 {pages} / {result.output_path.name}"
+                )
+                self.after(0, lambda: self.pdf_date_status_var.set("완료"))
+                self.after(
+                    0,
+                    lambda: messagebox.showinfo(
+                        "PDF DATE 수정 완료",
+                        f"원본 DATE: {old_values}\n"
+                        f"새 DATE: {result.new_value}\n"
+                        f"수정 페이지: {pages}\n\n"
+                        f"저장 위치:\n{result.output_path}",
+                        parent=self,
+                    ),
+                )
+            except Exception as exc:
+                self.log(f"❌ PDF DATE 수정 실패: {exc}")
+                self.after(0, lambda: self.pdf_date_status_var.set("오류"))
+                self.after(
+                    0,
+                    lambda error=str(exc): messagebox.showerror(
+                        "PDF DATE 수정 오류", error, parent=self
+                    ),
+                )
+
         threading.Thread(target=worker, daemon=True).start()
 
     # ── 접수대장 자동화 ─────────────────────────────────────────────────────
