@@ -33,7 +33,7 @@ if not exist "%VENV_PYTHON%" (
   if errorlevel 1 goto :install_error
 )
 
-"%VENV_PYTHON%" -c "import pypdf, olefile" >nul 2>&1
+"%VENV_PYTHON%" -c "import pypdf, reportlab, olefile" >nul 2>&1
 if errorlevel 1 (
   "%VENV_PYTHON%" -m pip install -r "%SCRIPT_DIR%requirements.txt"
   if errorlevel 1 goto :install_error

@@ -166,7 +166,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Step "Verifying the installation"
-& $VenvPython -c "import customtkinter, openpyxl, pandas, playwright, pypdf, olefile, win32com.client, xlrd, xlutils"
+& $VenvPython -c "import customtkinter, openpyxl, pandas, playwright, pypdf, reportlab, olefile, win32com.client, xlrd, xlutils"
 if ($LASTEXITCODE -ne 0) {
     throw "Required Python package verification failed."
 }

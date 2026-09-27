@@ -76,7 +76,13 @@ from membership_fee_register import (
     parse_fee_payment_excel,
     register_fee_payment_on_nmis,
 )
-from pdf_date_editor import default_output_path, replace_pdf_date_label
+from pdf_date_editor import (
+    default_output_path,
+    generate_random_date_value,
+    normalize_date_value,
+    read_pdf_date_info,
+    replace_pdf_date_label,
+)
 
 def find_chrome() -> Path | None:
     candidates = (
@@ -1567,12 +1573,11 @@ class ModernSlipUI(ctk.CTk):
         parent.grid_columnconfigure(0, weight=1)
         parent.grid_rowconfigure(1, weight=1)
 
-        self.pdf_input_var = tk.StringVar()
-        self.pdf_output_var = tk.StringVar()
-        self.pdf_date_value_var = tk.StringVar(
-            value=datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-        )
+        self.pdf_input_summary_var = tk.StringVar(value="선택된 PDF가 없습니다.")
+        self.pdf_output_dir_var = tk.StringVar()
+        self.pdf_date_value_var = tk.StringVar()
         self.pdf_date_status_var = tk.StringVar(value="대기")
+        self.pdf_date_items: list[dict[str, Any]] = []
 
         card = ctk.CTkFrame(
             parent,
@@ -1592,7 +1597,7 @@ class ModernSlipUI(ctk.CTk):
         ctk.CTkLabel(
             card,
             text=(
-                "UbiReport PDF의 DATE: 뒤 날짜·시간만 바꾼 복사본을 만듭니다. "
+                "PDF를 한 개 또는 여러 개 선택하면 문서 하단의 최초입력일과 원본 글꼴을 읽습니다. "
                 "중앙 전표일자와 원본 파일은 변경하지 않습니다."
             ),
             font=ctk.CTkFont(family="맑은 고딕", size=11),
@@ -1601,64 +1606,69 @@ class ModernSlipUI(ctk.CTk):
             justify="left",
         ).pack(anchor="w", padx=20, pady=(0, 16))
 
-        def add_path_row(label: str, variable: tk.StringVar, command, button_text: str) -> None:
-            row = ctk.CTkFrame(card, fg_color="transparent")
-            row.pack(fill="x", padx=20, pady=6)
-            ctk.CTkLabel(row, text=label, width=105, anchor="w").pack(side="left")
-            ctk.CTkEntry(
-                row,
-                textvariable=variable,
-                fg_color="#120F24",
-                border_color="#3B326B",
-            ).pack(side="left", fill="x", expand=True, padx=(0, 8))
-            ctk.CTkButton(
-                row,
-                text=button_text,
-                width=90,
-                fg_color="#374151",
-                hover_color="#4B5563",
-                command=command,
-            ).pack(side="left")
-
-        def browse_input() -> None:
-            selected = filedialog.askopenfilename(
-                title="DATE 값을 수정할 PDF 선택",
-                filetypes=(("PDF 파일", "*.pdf"), ("모든 파일", "*.*")),
-            )
-            if selected:
-                source = Path(selected)
-                self.pdf_input_var.set(str(source))
-                self.pdf_output_var.set(str(default_output_path(source)))
-
-        def browse_output() -> None:
-            source = Path(self.pdf_input_var.get().strip()) if self.pdf_input_var.get().strip() else None
-            initial_name = default_output_path(source).name if source else "DATE수정.pdf"
-            selected = filedialog.asksaveasfilename(
-                title="수정된 PDF 저장 위치",
-                defaultextension=".pdf",
-                initialfile=initial_name,
-                filetypes=(("PDF 파일", "*.pdf"),),
-            )
-            if selected:
-                self.pdf_output_var.set(selected)
-
-        add_path_row("원본 PDF", self.pdf_input_var, browse_input, "파일 선택")
-        add_path_row("저장 PDF", self.pdf_output_var, browse_output, "저장 위치")
-
-        date_row = ctk.CTkFrame(card, fg_color="transparent")
-        date_row.pack(fill="x", padx=20, pady=(10, 8))
-        ctk.CTkLabel(date_row, text="새 DATE 값", width=105, anchor="w").pack(side="left")
+        file_row = ctk.CTkFrame(card, fg_color="transparent")
+        file_row.pack(fill="x", padx=20, pady=6)
+        ctk.CTkLabel(file_row, text="원본 PDF", width=105, anchor="w").pack(side="left")
         ctk.CTkEntry(
-            date_row,
-            textvariable=self.pdf_date_value_var,
-            width=220,
+            file_row,
+            textvariable=self.pdf_input_summary_var,
+            state="readonly",
             fg_color="#120F24",
             border_color="#3B326B",
-        ).pack(side="left", padx=(0, 10))
-        ctk.CTkLabel(
-            date_row,
-            text="예: 2026-09-01 14:30",
-            text_color="#94A3B8",
+        ).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(
+            file_row,
+            text="여러 파일 선택",
+            width=110,
+            fg_color="#374151",
+            hover_color="#4B5563",
+            command=self._browse_pdf_date_inputs,
+        ).pack(side="left")
+
+        output_row = ctk.CTkFrame(card, fg_color="transparent")
+        output_row.pack(fill="x", padx=20, pady=6)
+        ctk.CTkLabel(output_row, text="저장 폴더", width=105, anchor="w").pack(side="left")
+        ctk.CTkEntry(
+            output_row,
+            textvariable=self.pdf_output_dir_var,
+            fg_color="#120F24",
+            border_color="#3B326B",
+        ).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(
+            output_row,
+            text="폴더 선택",
+            width=110,
+            fg_color="#374151",
+            hover_color="#4B5563",
+            command=self._browse_pdf_date_output_dir,
+        ).pack(side="left")
+
+        edit_row = ctk.CTkFrame(card, fg_color="transparent")
+        edit_row.pack(fill="x", padx=20, pady=(10, 8))
+        ctk.CTkLabel(edit_row, text="공통 입력값", width=105, anchor="w").pack(side="left")
+        ctk.CTkEntry(
+            edit_row,
+            textvariable=self.pdf_date_value_var,
+            width=200,
+            placeholder_text="2026-09-01 16:21",
+            fg_color="#120F24",
+            border_color="#3B326B",
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            edit_row,
+            text="전체 적용",
+            width=86,
+            fg_color="#475569",
+            hover_color="#64748B",
+            command=self.apply_common_pdf_date,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            edit_row,
+            text="🎲 최초 입력일 이후 랜덤",
+            width=180,
+            fg_color="#7C3AED",
+            hover_color="#6D28D9",
+            command=self.apply_random_pdf_dates,
         ).pack(side="left")
 
         action_row = ctk.CTkFrame(card, fg_color="transparent")
@@ -1670,80 +1680,257 @@ class ModernSlipUI(ctk.CTk):
         ).pack(side="left")
         ctk.CTkButton(
             action_row,
-            text="DATE 수정본 저장",
-            width=170,
+            text="선택 PDF 일괄 저장",
+            width=180,
             height=38,
             fg_color="#10B981",
             hover_color="#059669",
             command=self.start_pdf_date_edit,
         ).pack(side="right")
 
-        guide = ctk.CTkFrame(
+        table_box = ctk.CTkFrame(
             parent,
             fg_color="#18152E",
             border_color="#2E2756",
             border_width=1,
             corner_radius=14,
         )
-        guide.grid(row=1, column=0, sticky="new")
+        table_box.grid(row=1, column=0, sticky="nsew")
+        table_box.grid_rowconfigure(1, weight=1)
+        table_box.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
-            guide,
-            text="처리 방식",
+            table_box,
+            text="PDF별 최초 입력일 / 수정 입력일",
             font=ctk.CTkFont(family="맑은 고딕", size=14, weight="bold"),
             text_color="#CBD5E1",
-        ).pack(anchor="w", padx=20, pady=(16, 8))
+        ).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 8))
+
+        columns = ("file", "initial", "new", "font", "status")
+        self.pdf_date_tree = ttk.Treeview(
+            table_box,
+            columns=columns,
+            show="headings",
+            selectmode="extended",
+            height=9,
+        )
+        headings = {
+            "file": "파일명",
+            "initial": "최초 입력일",
+            "new": "수정 입력일",
+            "font": "원본 글꼴",
+            "status": "상태",
+        }
+        widths = {"file": 280, "initial": 150, "new": 150, "font": 105, "status": 105}
+        for column in columns:
+            self.pdf_date_tree.heading(column, text=headings[column])
+            self.pdf_date_tree.column(
+                column,
+                width=widths[column],
+                minwidth=80,
+                anchor="w" if column == "file" else "center",
+            )
+        self.pdf_date_tree.grid(row=1, column=0, sticky="nsew", padx=(16, 0), pady=(0, 14))
+        tree_scroll = ttk.Scrollbar(table_box, orient="vertical", command=self.pdf_date_tree.yview)
+        tree_scroll.grid(row=1, column=1, sticky="ns", padx=(0, 12), pady=(0, 14))
+        self.pdf_date_tree.configure(yscrollcommand=tree_scroll.set)
+
         ctk.CTkLabel(
-            guide,
+            table_box,
             text=(
-                "1. 각 페이지에서 DATE: 라벨과 기존 날짜를 자동 탐지합니다.\n"
-                "2. 기존 날짜 영역만 지우고 새 날짜를 같은 위치에 입력합니다.\n"
-                "3. 원본과 페이지 수를 보존한 새 PDF를 저장합니다."
+                "랜덤 규칙: 문서 하단 최초입력일보다 뒤의 같은 날 시간으로 생성하며 17:00을 넘지 않습니다. "
+                "최초 입력일이 17:00 이후이면 그 시각부터 1~10분 뒤로 생성합니다."
             ),
             justify="left",
+            wraplength=780,
             text_color="#94A3B8",
-        ).pack(anchor="w", padx=20, pady=(0, 16))
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 14))
 
-    def start_pdf_date_edit(self) -> None:
-        source = Path(self.pdf_input_var.get().strip()).expanduser()
-        if not source.is_file():
-            messagebox.showerror("PDF 파일 오류", "원본 PDF 파일을 선택하세요.", parent=self)
+    def _browse_pdf_date_inputs(self) -> None:
+        selected = filedialog.askopenfilenames(
+                title="DATE 값을 수정할 PDF 선택 (여러 개 선택 가능)",
+                filetypes=(("PDF 파일", "*.pdf"), ("모든 파일", "*.*")),
+            )
+        if not selected:
             return
-        output_text = self.pdf_output_var.get().strip()
-        destination = Path(output_text).expanduser() if output_text else default_output_path(source)
-        self.pdf_output_var.set(str(destination))
-        new_value = self.pdf_date_value_var.get().strip()
-        self.pdf_date_status_var.set("처리 중...")
+        paths = [Path(value) for value in selected]
+        self.pdf_input_summary_var.set(
+            f"{len(paths)}개 선택 - {paths[0].name}" if len(paths) > 1 else paths[0].name
+        )
+        self.pdf_output_dir_var.set(str(paths[0].parent))
+        self._load_pdf_date_items(paths)
+
+    def _browse_pdf_date_output_dir(self) -> None:
+        selected = filedialog.askdirectory(title="수정된 PDF를 저장할 폴더 선택")
+        if selected:
+            self.pdf_output_dir_var.set(selected)
+
+    def _load_pdf_date_items(self, paths: list[Path]) -> None:
+        self.pdf_date_items = []
+        self.pdf_date_tree.delete(*self.pdf_date_tree.get_children())
+        self.pdf_date_status_var.set(f"최초 입력일 확인 중... 0/{len(paths)}")
 
         def worker() -> None:
+            loaded: list[dict[str, Any]] = []
+            for index, source in enumerate(paths, start=1):
+                try:
+                    info = read_pdf_date_info(source)
+                    loaded.append(
+                        {
+                            "source": source,
+                            "initial": info.initial_value,
+                            "new": "",
+                            "font": ", ".join(info.font_names),
+                            "status": "대기" if info.initial_value else "최초입력일 없음",
+                            "error": "",
+                        }
+                    )
+                except Exception as exc:
+                    loaded.append(
+                        {
+                            "source": source,
+                            "initial": "",
+                            "new": "",
+                            "font": "",
+                            "status": "확인 실패",
+                            "error": str(exc),
+                        }
+                    )
+                self.after(
+                    0,
+                    lambda current=index, total=len(paths): self.pdf_date_status_var.set(
+                        f"최초 입력일 확인 중... {current}/{total}"
+                    ),
+                )
+
+            def finish() -> None:
+                self.pdf_date_items = loaded
+                self._refresh_pdf_date_tree()
+                valid_count = sum(bool(item["initial"]) for item in loaded)
+                self.pdf_date_status_var.set(
+                    f"최초 입력일 확인 완료: {valid_count}/{len(loaded)}개"
+                )
+                if valid_count == 1:
+                    initial = next(item["initial"] for item in loaded if item["initial"])
+                    self.pdf_date_value_var.set(initial)
+
+            self.after(0, finish)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _refresh_pdf_date_tree(self) -> None:
+        self.pdf_date_tree.delete(*self.pdf_date_tree.get_children())
+        for index, item in enumerate(self.pdf_date_items):
+            self.pdf_date_tree.insert(
+                "",
+                "end",
+                iid=str(index),
+                values=(
+                    item["source"].name,
+                    item["initial"],
+                    item["new"],
+                    item["font"],
+                    item["status"],
+                ),
+            )
+
+    def apply_common_pdf_date(self) -> None:
+        if not self.pdf_date_items:
+            messagebox.showwarning("PDF 미선택", "먼저 PDF 파일을 선택하세요.", parent=self)
+            return
+        try:
+            new_value = normalize_date_value(self.pdf_date_value_var.get())
+        except Exception as exc:
+            messagebox.showerror("입력일 오류", str(exc), parent=self)
+            return
+        for item in self.pdf_date_items:
+            if not item["error"]:
+                item["new"] = new_value
+                item["status"] = "입력 완료"
+        self._refresh_pdf_date_tree()
+        self.pdf_date_status_var.set(f"공통 입력일 적용: {new_value}")
+
+    def apply_random_pdf_dates(self) -> None:
+        if not self.pdf_date_items:
+            messagebox.showwarning("PDF 미선택", "먼저 PDF 파일을 선택하세요.", parent=self)
+            return
+        generated_count = 0
+        for item in self.pdf_date_items:
+            if not item["initial"]:
+                continue
             try:
-                result = replace_pdf_date_label(source, destination, new_value)
-                pages = ", ".join(str(page) for page in result.changed_pages)
-                old_values = ", ".join(result.old_values)
-                self.log(
-                    f"PDF DATE 수정 완료: {old_values} → {result.new_value} "
-                    f"/ 페이지 {pages} / {result.output_path.name}"
-                )
-                self.after(0, lambda: self.pdf_date_status_var.set("완료"))
-                self.after(
-                    0,
-                    lambda: messagebox.showinfo(
-                        "PDF DATE 수정 완료",
-                        f"원본 DATE: {old_values}\n"
-                        f"새 DATE: {result.new_value}\n"
-                        f"수정 페이지: {pages}\n\n"
-                        f"저장 위치:\n{result.output_path}",
-                        parent=self,
-                    ),
-                )
+                item["new"] = generate_random_date_value(item["initial"])
+                item["status"] = "랜덤 생성"
+                generated_count += 1
             except Exception as exc:
-                self.log(f"❌ PDF DATE 수정 실패: {exc}")
-                self.after(0, lambda: self.pdf_date_status_var.set("오류"))
+                item["status"] = "랜덤 실패"
+                item["error"] = str(exc)
+        self._refresh_pdf_date_tree()
+        self.pdf_date_status_var.set(f"랜덤 입력일 생성 완료: {generated_count}개")
+
+    def start_pdf_date_edit(self) -> None:
+        if not self.pdf_date_items:
+            messagebox.showerror("PDF 파일 오류", "원본 PDF 파일을 선택하세요.", parent=self)
+            return
+        pending = [item for item in self.pdf_date_items if item["new"] and not item["error"]]
+        if not pending:
+            messagebox.showerror(
+                "수정 입력일 없음",
+                "[랜덤 입력] 또는 [전체 적용]으로 수정 입력일을 먼저 만드세요.",
+                parent=self,
+            )
+            return
+        output_text = self.pdf_output_dir_var.get().strip()
+        output_dir = Path(output_text).expanduser() if output_text else pending[0]["source"].parent
+        self.pdf_date_status_var.set(f"일괄 처리 중... 0/{len(pending)}")
+
+        def worker() -> None:
+            success_count = 0
+            failures: list[str] = []
+            for current, item in enumerate(pending, start=1):
+                source = item["source"]
+                destination = output_dir / default_output_path(source).name
+                try:
+                    result = replace_pdf_date_label(source, destination, item["new"])
+                    item["status"] = "저장 완료"
+                    item["error"] = ""
+                    success_count += 1
+                    font_text = ", ".join(result.source_fonts)
+                    font_status = "원본 글꼴 일치" if result.font_matched else "대체 글꼴 사용"
+                    self.log(
+                        f"PDF DATE 수정 완료 [{source.name}]: "
+                        f"최초입력일 {item['initial'] or '없음'} / DATE → "
+                        f"{result.new_value} / {font_text} ({font_status})"
+                    )
+                except Exception as exc:
+                    item["status"] = "저장 실패"
+                    item["error"] = str(exc)
+                    failures.append(f"{source.name}: {exc}")
+                    self.log(f"❌ PDF DATE 수정 실패 [{source.name}]: {exc}")
+                self.after(0, self._refresh_pdf_date_tree)
                 self.after(
                     0,
-                    lambda error=str(exc): messagebox.showerror(
-                        "PDF DATE 수정 오류", error, parent=self
+                    lambda done=current, total=len(pending): self.pdf_date_status_var.set(
+                        f"일괄 처리 중... {done}/{total}"
                     ),
                 )
+
+            def finish() -> None:
+                self._refresh_pdf_date_tree()
+                self.pdf_date_status_var.set(
+                    f"완료: 성공 {success_count}개 / 실패 {len(failures)}개"
+                )
+                detail = "\n".join(failures[:8])
+                if len(failures) > 8:
+                    detail += f"\n외 {len(failures) - 8}건"
+                message = (
+                    f"성공 {success_count}개 / 실패 {len(failures)}개\n"
+                    f"저장 폴더: {output_dir}"
+                )
+                if detail:
+                    message += f"\n\n실패 내역:\n{detail}"
+                messagebox.showinfo("PDF DATE 일괄 처리 완료", message, parent=self)
+
+            self.after(0, finish)
 
         threading.Thread(target=worker, daemon=True).start()
 
