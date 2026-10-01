@@ -111,9 +111,13 @@ ctk.set_default_color_theme("blue")
 
 # ── 설정 파일 및 글로벌 변수 ────────────────────────────────────────────────
 SETTINGS_FILE = Path(__file__).parent / "settings.json"
+APP_ICON_ICO = Path(__file__).parent / "assets" / "nmis_automation.ico"
+APP_ICON_PNG = Path(__file__).parent / "assets" / "nmis_automation.png"
+APP_USER_MODEL_ID = "shin.nmis.integrated-automation"
 
-NMIS_USER_ID = "e20240056"
-NMIS_PASSWORD = "a4848665"
+# 로그인 정보는 Git에 포함하지 않고 로컬 settings.json(또는 환경 변수)에서만 읽습니다.
+NMIS_USER_ID = os.environ.get("NMIS_USER_ID", "")
+NMIS_PASSWORD = os.environ.get("NMIS_PASSWORD", "")
 
 KEYWORD_RULES: dict[str, str] = {
     "회비": "member_fee",
@@ -253,6 +257,20 @@ def cdp_is_ready() -> bool:
 
 
 class ModernSlipUI(ctk.CTk):
+    def _apply_app_icon(self) -> None:
+        """프로그램 창과 작업표시줄에 통합 자동화 전용 아이콘을 적용한다."""
+        try:
+            if APP_ICON_ICO.is_file():
+                self.iconbitmap(default=str(APP_ICON_ICO))
+        except Exception:
+            pass
+        try:
+            if APP_ICON_PNG.is_file():
+                self._app_icon_image = tk.PhotoImage(file=str(APP_ICON_PNG))
+                self.iconphoto(True, self._app_icon_image)
+        except Exception:
+            pass
+
     def _center_window(self, width: int = 1120, height: int = 780) -> None:
         try:
             self.update_idletasks()
@@ -270,6 +288,8 @@ class ModernSlipUI(ctk.CTk):
         load_settings()
 
         self.title("통합 자동화 시스템 — Modern Dark Edition")
+        self._apply_app_icon()
+        self.after(250, self._apply_app_icon)
         self._center_window(1120, 780)
         self.minsize(980, 680)
 
@@ -3964,6 +3984,13 @@ class ModernSlipUI(ctk.CTk):
 
 
 def main() -> None:
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+        except Exception:
+            pass
     app = ModernSlipUI()
     app.mainloop()
 

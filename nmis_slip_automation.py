@@ -1791,6 +1791,149 @@ def dismiss_unexpected_popups(page: Page) -> None:
         pass
 
 
+def wait_for_angular_state(
+    page: Page,
+    expected_state: str,
+    *,
+    timeout_ms: int = 15_000,
+) -> str:
+    """AngularJS 화면 전환이 실제로 끝날 때까지 기다린다."""
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    last_state = ""
+    while time.monotonic() < deadline:
+        try:
+            last_state = page.evaluate(
+                """() => {
+                    try {
+                        const state = angular.element(document.body).injector().get('$state');
+                        return state.current ? (state.current.name || '') : '';
+                    } catch (_) {
+                        return '';
+                    }
+                }"""
+            )
+        except Exception:
+            last_state = ""
+        if last_state == expected_state:
+            return last_state
+        time.sleep(0.2)
+    raise RuntimeError(
+        f"NMIS 화면 이동 시간 초과: 요청={expected_state}, 현재={last_state or '확인 불가'}"
+    )
+
+
+def go_to_angular_state(
+    page: Page,
+    target_state: str,
+    *,
+    timeout_ms: int = 15_000,
+) -> None:
+    """AngularJS 내부 경로로 이동하고 목표 화면 도착까지 검증한다."""
+    current_state = ""
+    try:
+        current_state = page.evaluate(
+            """() => {
+                try {
+                    const state = angular.element(document.body).injector().get('$state');
+                    return state.current ? (state.current.name || '') : '';
+                } catch (_) {
+                    return '';
+                }
+            }"""
+        )
+    except Exception:
+        pass
+    if current_state != target_state:
+        moved = page.evaluate(
+            """target => {
+                try {
+                    angular.element(document.body).injector().get('$state').go(target);
+                    return true;
+                } catch (_) {
+                    return false;
+                }
+            }""",
+            target_state,
+        )
+        if not moved:
+            raise RuntimeError(f"NMIS 내부 경로 이동 명령 실패: {target_state}")
+    wait_for_angular_state(page, target_state, timeout_ms=timeout_ms)
+
+
+def wait_for_angular_grid(
+    page: Page,
+    grid_names: Iterable[str],
+    *,
+    timeout_ms: int = 15_000,
+    allow_empty: bool = False,
+) -> list[dict]:
+    """AngularJS scope의 조회 결과 배열이 생성될 때까지 기다린다."""
+    names = list(grid_names)
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while time.monotonic() < deadline:
+        try:
+            result = page.evaluate(
+                """names => {
+                    if (!window.angular) return {found: false, rows: []};
+                    const seen = new Set();
+                    for (const element of document.querySelectorAll('*')) {
+                        let scope;
+                        try { scope = angular.element(element).scope(); } catch (_) { continue; }
+                        if (!scope || seen.has(scope.$id)) continue;
+                        seen.add(scope.$id);
+                        for (const name of names) {
+                            if (Array.isArray(scope[name])) {
+                                return {found: true, rows: scope[name]};
+                            }
+                        }
+                    }
+                    return {found: false, rows: []};
+                }""",
+                names,
+            )
+            rows = result.get("rows", []) if isinstance(result, dict) else []
+            found = bool(result.get("found")) if isinstance(result, dict) else False
+            if found and (allow_empty or rows):
+                return rows
+        except Exception:
+            pass
+        time.sleep(0.2)
+    joined = ", ".join(names)
+    suffix = "(빈 결과 허용)" if allow_empty else "(1행 이상 필요)"
+    raise RuntimeError(f"NMIS 조회 결과 로딩 시간 초과: {joined} {suffix}")
+
+
+def validate_monthly_report_data(data: Mapping[str, object]) -> None:
+    """조회 실패로 생성된 0값이 월보고 엑셀에 저장되는 것을 막는다."""
+    missing_sources = [
+        label
+        for key, label in (
+            ("member_source_loaded", "월회원현황보고"),
+            ("revenue_source_loaded", "세입세출표"),
+            ("journal_source_loaded", "금전출납부"),
+        )
+        if not data.get(key)
+    ]
+    if missing_sources:
+        raise RuntimeError(
+            "월보고 원본 자료 확인 실패: " + ", ".join(missing_sources)
+        )
+
+    invalid_core = [
+        label
+        for key, label in (
+            ("study_cnt", "공부상업소수"),
+            ("real_cnt", "실존업소수"),
+            ("member_cnt", "회원수"),
+        )
+        if int(data.get(key, 0) or 0) <= 0
+    ]
+    if invalid_core:
+        raise RuntimeError(
+            "월회원현황 핵심값을 읽지 못했습니다: " + ", ".join(invalid_core)
+        )
+
+
 def fill_monthly_report_from_nmis(
     page: Page,
     excel_path: Path | str,
@@ -1919,6 +2062,12 @@ def fill_monthly_report_from_nmis(
 
     # 5. 세입세출표 데이터 정밀 파싱 (AngularJS 스코프 직렬화 & 메인 DOM 파싱 2중 적용)
     write_log("📌 [3/5] NMIS 화면에서 계정과목 및 금월세입액/금월세출액 데이터 파싱 중...")
+    wait_for_angular_state(page, "account/close/reandex/book/list", timeout_ms=15_000)
+    wait_for_angular_grid(
+        page,
+        ("gridDataaccountclosereandexbooklist", "gridDataaccount"),
+        timeout_ms=15_000,
+    )
     
     extracted_items = page.evaluate("""
         (function() {
@@ -1975,6 +2124,11 @@ def fill_monthly_report_from_nmis(
                 "in_mon": in_m,
                 "out_mon": out_m,
             }
+
+    if not subject_map:
+        raise RuntimeError(
+            f"{target_ym_dash} 세입세출표 조회 결과에서 계정과목을 읽지 못했습니다."
+        )
 
     write_log(f"  └─ NMIS 웹 화면 파싱 완료! 총 {len(subject_map)}개 과목 수집됨:")
     for s_name, s_info in subject_map.items():
@@ -2260,22 +2414,13 @@ def fill_member_status_from_nmis(
     write_log(f"⚡ [1/5] NMIS '월회원현황보고' 초고속 라우팅...")
     dismiss_unexpected_popups(page)
 
-    # 이미 해당 화면이면 0초 스킵
-    curr_state = page.evaluate('''
-        (function() {
-            try {
-                var s = angular.element(document.body).injector().get('$state');
-                return s.current ? s.current.name : '';
-            } catch(e) { return ''; }
-        })()
-    ''')
-    if curr_state != 'master/member/stats/month/member/report/list':
-        page.evaluate('''
-            (function() {
-                try { angular.element(document.body).injector().get('$state').go('master/member/stats/month/member/report/list'); } catch(e) {}
-            })()
-        ''')
-        time.sleep(0.5)
+    member_state = 'master/member/stats/month/member/report/list'
+    go_to_angular_state(page, member_state)
+    page.wait_for_selector(
+        "input[name='regDate'], input[ng-model*='regDate']",
+        state="attached",
+        timeout=15_000,
+    )
 
     # 기준년월 세팅 & 조회
     write_log(f"⚡ [2/5] 기준년월 '{clean_ym[:6]}' 세팅 & 조회...")
@@ -2339,6 +2484,12 @@ def fill_member_status_from_nmis(
         except Exception:
             pass
         time.sleep(0.3)
+
+    if study_cnt <= 0 or real_cnt <= 0 or member_cnt <= 0:
+        raise RuntimeError(
+            "월회원현황보고 조회 결과를 읽지 못했습니다. "
+            f"공부상={study_cnt}, 실존={real_cnt}, 회원={member_cnt}"
+        )
 
     # 엑셀 '회원현황' 시트 실시간 기입
     target_path = Path(excel_path).expanduser().resolve()
@@ -2434,18 +2585,13 @@ def fetch_sheet4_data_only(
     write_log(f"⚡ [1/3] NMIS 월회원현황보고 → 공부상/실존/회원/가입세부 수집...")
     dismiss_unexpected_popups(page)
 
-    curr_state = page.evaluate('''
-        (function() {
-            try { return angular.element(document.body).injector().get('$state').current.name || ''; } catch(e) { return ''; }
-        })()
-    ''')
-    if curr_state != 'master/member/stats/month/member/report/list':
-        page.evaluate('''
-            (function() {
-                try { angular.element(document.body).injector().get('$state').go('master/member/stats/month/member/report/list'); } catch(e) {}
-            })()
-        ''')
-        time.sleep(0.5)
+    member_state = 'master/member/stats/month/member/report/list'
+    go_to_angular_state(page, member_state)
+    page.wait_for_selector(
+        "input[name='regDate'], input[ng-model*='regDate']",
+        state="attached",
+        timeout=15_000,
+    )
 
     ym_6 = clean_ym[:6]
     page.evaluate(f'''
@@ -2552,6 +2698,14 @@ def fetch_sheet4_data_only(
             pass
         time.sleep(0.3)
 
+    if study_cnt <= 0 or real_cnt <= 0 or member_cnt <= 0:
+        raise RuntimeError(
+            "월회원현황보고 자료수집 실패: "
+            f"공부상={study_cnt}, 실존={real_cnt}, 회원={member_cnt}"
+        )
+
+    member_source_loaded = True
+
     new_occur_cnt = join_new + join_nonmem
     chg_occur_cnt = chg_mem + chg_nonmem
     new_join_cnt = join_new
@@ -2562,28 +2716,29 @@ def fetch_sheet4_data_only(
     write_log(f"⚡ [2/3] NMIS 세입세출표 → 회비/가입금 수입 실적 수집...")
     fee_revenue = 0
     join_fee_revenue = 0
+    revenue_source_loaded = False
     try:
-        page.evaluate('''
-            (function() {
-                try { angular.element(document.body).injector().get('$state').go('account/close/reandex/book/list'); } catch(e) {}
-            })()
-        ''')
-        time.sleep(1.0)
-        
-        ym6 = clean_ym[:6]
-        page.evaluate(f'''
-            (function(ym6) {{
-                var inps = document.querySelectorAll("input[name*='slipYearMonth'], input[ng-model*='slipYearMonth'], input[ng-model*='stdYear']");
-                inps.forEach(function(inp) {{
-                    inp.value = ym6;
-                    var sc = angular.element(inp).scope();
-                    if (sc && sc.searchParams) {{
-                        sc.searchParams.slipYearMonth = ym6;
-                        sc.searchParams.regDate = ym6;
-                    }}
-                }});
-            }})("{ym6}")
-        ''')
+        revenue_state = 'account/close/reandex/book/list'
+        go_to_angular_state(page, revenue_state)
+        page.wait_for_selector(
+            "input[name='slipYearMonth']",
+            state="visible",
+            timeout=15_000,
+        )
+
+        page.evaluate(
+            '''({ymDigits, ymDash}) => {
+                const inp = document.querySelector("input[name='slipYearMonth']");
+                if (!inp) return false;
+                inp.value = ymDash;
+                inp.dispatchEvent(new Event('input', {bubbles: true}));
+                inp.dispatchEvent(new Event('change', {bubbles: true}));
+                const sc = angular.element(inp).scope();
+                if (sc && sc.searchParams) sc.searchParams.slipYearMonth = ymDigits;
+                return true;
+            }''',
+            {"ymDigits": clean_ym[:6], "ymDash": target_ym_dash},
+        )
         
         page.evaluate('''
             (function() {
@@ -2595,20 +2750,11 @@ def fetch_sheet4_data_only(
                 if (sb) sb.click();
             })()
         ''')
-        time.sleep(1.5)
-
-        scope_grid = page.evaluate('''
-            (function() {
-                if (!window.angular) return null;
-                var all = document.querySelectorAll('*');
-                for (var i = 0; i < all.length; i++) {
-                    var sc = angular.element(all[i]).scope();
-                    if (sc && Array.isArray(sc.gridDataaccountclosereandexbooklist)) return sc.gridDataaccountclosereandexbooklist;
-                    if (sc && Array.isArray(sc.gridDataaccount)) return sc.gridDataaccount;
-                }
-                return null;
-            })()
-        ''')
+        scope_grid = wait_for_angular_grid(
+            page,
+            ("gridDataaccountclosereandexbooklist", "gridDataaccount"),
+            timeout_ms=15_000,
+        )
         if scope_grid and isinstance(scope_grid, list):
             for row_item in scope_grid:
                 acct = str(row_item.get("acctName", ""))
@@ -2617,21 +2763,24 @@ def fetch_sheet4_data_only(
                     fee_revenue += in_mon
                 if "가입금" in acct:
                     join_fee_revenue += in_mon
+        revenue_source_loaded = True
         write_log(f"  └─ 세입 수입 수집 완료: 회비({fee_revenue:,.0f}원), 가입금({join_fee_revenue:,.0f}원)")
     except Exception as e:
-        write_log(f"  └─ 세입 실적 수집 참고: {e}")
+        raise RuntimeError(f"세입세출표 자료수집 실패: {e}") from e
 
     # ── Step 3: 금전출납부 → CMS/직접수금 ──
     write_log(f"⚡ [3/3] NMIS 금전출납부 {from_date_str}~{to_date_str} → CMS/직접수금 집계...")
     cms_cnt = 0
     direct_cnt = 0
+    journal_source_loaded = False
     try:
-        page.evaluate('''
-            (function() {
-                try { angular.element(document.body).injector().get('$state').go('account/invoice/book/list'); } catch(e) {}
-            })()
-        ''')
-        time.sleep(1.0)
+        journal_state = 'account/invoice/book/list'
+        go_to_angular_state(page, journal_state)
+        page.wait_for_selector(
+            "input[name='fromDate'], input[ng-model*='fromDate']",
+            state="attached",
+            timeout=15_000,
+        )
 
         page.evaluate(f'''
             (function(fd, td) {{
@@ -2661,22 +2810,21 @@ def fetch_sheet4_data_only(
                 if (sb) sb.click();
             })()
         ''')
-        time.sleep(1.5)
-
         import re
-        journal_rows = page.evaluate('''
-            (function() {
-                if (!window.angular) return null;
-                var all = document.querySelectorAll('*');
-                for (var i = 0; i < all.length; i++) {
-                    var sc = angular.element(all[i]).scope();
-                    if (sc && Array.isArray(sc.gridDataaccountinvoicebooklist)) {
-                        return sc.gridDataaccountinvoicebooklist.map(r => ({ summary: r.summary || '', acctName: r.acctName || '' }));
-                    }
-                }
-                return null;
-            })()
-        ''')
+        raw_journal_rows = wait_for_angular_grid(
+            page,
+            ("gridDataaccountinvoicebooklist",),
+            timeout_ms=15_000,
+            allow_empty=True,
+        )
+        journal_rows = [
+            {
+                "summary": row.get("summary", ""),
+                "acctName": row.get("acctName", ""),
+            }
+            for row in raw_journal_rows
+            if isinstance(row, dict)
+        ]
 
         if journal_rows and isinstance(journal_rows, list):
             for item in journal_rows:
@@ -2696,13 +2844,14 @@ def fetch_sheet4_data_only(
                     else:
                         direct_cnt += 1
 
+        journal_source_loaded = True
         write_log(f"  └─ 금전출납부 집계 완료: CMS({cms_cnt}건), 직접수금({direct_cnt}건)")
     except Exception as e:
-        write_log(f"  └─ 금전출납부 수집 참고: {e}")
+        raise RuntimeError(f"금전출납부 자료수집 실패: {e}") from e
 
     write_log(f"🎉 12대 핵심 데이터 수집 완료!")
 
-    return {
+    result = {
         "target_month": target_month_int,
         "target_ym": target_ym_dash,
         "study_cnt": study_cnt,
@@ -2717,7 +2866,12 @@ def fetch_sheet4_data_only(
         "new_join_cnt": new_join_cnt,
         "chg_join_cnt": chg_join_cnt,
         "exist_nonmem_join_cnt": exist_nonmem_join_cnt,
+        "member_source_loaded": member_source_loaded,
+        "revenue_source_loaded": revenue_source_loaded,
+        "journal_source_loaded": journal_source_loaded,
     }
+    validate_monthly_report_data(result)
+    return result
 def fill_sheet4_excel_from_data(
     excel_path: str | Path,
     data: dict,
@@ -2730,6 +2884,7 @@ def fill_sheet4_excel_from_data(
 
     target_path = Path(excel_path).expanduser().resolve()
     target_month_int = data.get("target_month", datetime.now().month)
+    validate_monthly_report_data(data)
 
     write_log(f"📌 엑셀 '월별 회원현황 및 세입실적' 시트 {target_month_int}월 행 기입 시작...")
 
@@ -2800,6 +2955,7 @@ def fill_staff_join_excel_from_data(
 
     target_path = Path(excel_path).expanduser().resolve()
     target_month_int = data.get("target_month", datetime.now().month)
+    validate_monthly_report_data(data)
 
     write_log(f"📌 엑셀 '직원회원가입실적' 시트 {target_month_int}월 행 기입 시작...")
 
@@ -2900,25 +3056,71 @@ def fill_all_monthly_reports_sequentially(
     write_log("🚀 [통합 4단계 전과정 연속 자동 작성 프로세스 시작]")
     write_log("==========================================================================")
 
+    def run_stage(stage_label: str, action):
+        try:
+            result = action()
+        except Exception as exc:
+            write_log(f"❌ [{stage_label}] 중단: {exc}")
+            raise RuntimeError(f"{stage_label} 실패: {exc}") from exc
+        write_log(f"✅ [{stage_label}] 완료")
+        return result
+
     # 1단계: 세입세출표
     write_log("\n📌 [1/4단계] 세입세출표 시트 자동 채우기 시작...")
-    res_s1 = fill_monthly_report_from_nmis(page, excel_path=excel_path, target_year_month=target_year_month, log_cb=log_cb)
+    res_s1 = run_stage(
+        "1/4단계 세입세출표",
+        lambda: fill_monthly_report_from_nmis(
+            page,
+            excel_path=excel_path,
+            target_year_month=target_year_month,
+            log_cb=log_cb,
+        ),
+    )
 
     # 2단계: 회원현황
     write_log("\n📌 [2/4단계] 회원현황 시트 (2번째 시트) 자동 채우기 시작...")
-    res_s2 = fill_member_status_from_nmis(page, excel_path=excel_path, target_year_month=target_year_month, log_cb=log_cb)
+    res_s2 = run_stage(
+        "2/4단계 회원현황",
+        lambda: fill_member_status_from_nmis(
+            page,
+            excel_path=excel_path,
+            target_year_month=target_year_month,
+            log_cb=log_cb,
+        ),
+    )
 
     # 3/4단계 수집: 12대 핵심 데이터 수집
     write_log("\n📌 [3/4단계] NMIS 12대 핵심 데이터 초고속 통합 수집...")
-    data = fetch_sheet4_data_only(page, target_year_month=target_year_month, log_cb=log_cb)
+    data = run_stage(
+        "3/4단계 NMIS 자료수집",
+        lambda: fetch_sheet4_data_only(
+            page,
+            target_year_month=target_year_month,
+            log_cb=log_cb,
+        ),
+    )
 
     # 3단계 기입: 월별 회원현황 및 세입실적
     write_log("\n📌 [3/4단계] 4번째 시트 '월별 회원현황 및 세입실적' 엑셀 기입...")
-    res_s3 = fill_sheet4_excel_from_data(excel_path=excel_path, data=data, log_cb=log_cb)
+    res_s3 = run_stage(
+        "3/4단계 월별 회원현황 및 세입실적",
+        lambda: fill_sheet4_excel_from_data(
+            excel_path=excel_path,
+            data=data,
+            log_cb=log_cb,
+        ),
+    )
 
     # 4단계 기입: 직원회원가입실적
     write_log("\n📌 [4/4단계] 5번째 시트 '직원회원가입실적' 엑셀 기입...")
-    res_s4 = fill_staff_join_excel_from_data(excel_path=excel_path, data=data, log_cb=log_cb)
+    res_s4 = run_stage(
+        "4/4단계 직원회원가입실적",
+        lambda: fill_staff_join_excel_from_data(
+            excel_path=excel_path,
+            data=data,
+            log_cb=log_cb,
+        ),
+    )
 
     write_log("\n==========================================================================")
     write_log("🎉 [통합 4단계 전과정 100% 라이브 자동 작성 완결!]")

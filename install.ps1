@@ -11,8 +11,9 @@ $VenvRoot = Join-Path $AppRoot ".venv"
 $VenvPython = Join-Path $VenvRoot "Scripts\python.exe"
 $Requirements = Join-Path $AppRoot "requirements.txt"
 $Launcher = Join-Path $AppRoot "run_ui.vbs"
+$IconPath = Join-Path $AppRoot "assets\nmis_automation.ico"
 $Desktop = [Environment]::GetFolderPath("Desktop")
-$ShortcutPath = Join-Path $Desktop "NMIS Integrated Automation.lnk"
+$ShortcutPath = Join-Path $Desktop "통합 자동화 시스템.lnk"
 
 function Write-Step([string]$Message) {
     Write-Host "`n>> $Message" -ForegroundColor Cyan
@@ -177,7 +178,7 @@ $Shortcut = $Shell.CreateShortcut($ShortcutPath)
 $Shortcut.TargetPath = "$env:WINDIR\System32\wscript.exe"
 $Shortcut.Arguments = '"' + $Launcher + '"'
 $Shortcut.WorkingDirectory = $AppRoot
-$Shortcut.IconLocation = "$env:WINDIR\System32\shell32.dll,0"
+$Shortcut.IconLocation = $(if (Test-Path -LiteralPath $IconPath) { "$IconPath,0" } else { "$env:WINDIR\System32\shell32.dll,0" })
 $Shortcut.Save()
 
 Write-Host "`nInstallation completed." -ForegroundColor Green
