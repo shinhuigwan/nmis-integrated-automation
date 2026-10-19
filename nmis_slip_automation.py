@@ -34,6 +34,7 @@ SITE_URL = "http://nmis.foodservice.or.kr/"
 ACCOUNT_CODES = {
     "5102": "가입금",
     "5141": "회비",
+    "4311": "경조비",
     "4326": "기본급",
     "4337": "복리후생비",
     "4349": "수도광열비",
@@ -372,6 +373,10 @@ def suggest_slip_settings(transaction: Transaction, transaction_type: str) -> di
         "basic_account": "4326",
         "bonus_account": "4403",
     }
+
+    if transaction.direction == "출금" and "경조" in transaction.content:
+        settings.update(account_code="4311", account_name="경조비")
+        return settings
 
     if transaction_type == "member_fee":
         settings.update(account_code="5141", account_name="회비")

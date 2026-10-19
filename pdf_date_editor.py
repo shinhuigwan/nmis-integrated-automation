@@ -12,8 +12,8 @@ import os
 import random
 import re
 import tempfile
-from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from pypdf import PdfReader, PdfWriter
@@ -40,6 +40,7 @@ class PdfDateLocation:
     x: float
     baseline_y: float
     font_size: float
+    initial_value: str = ""
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,7 @@ class PdfDateEditResult:
     new_value: str
     source_fonts: tuple[str, ...]
     font_matched: bool
+    new_values: tuple[str, ...] = ()
 
 
 def normalize_date_value(value: str) -> str:
@@ -111,28 +113,16 @@ def generate_random_date_value(
     initial_value: str,
     rng: random.Random | None = None,
 ) -> str:
-    """Return a random minute after the initial timestamp.
-
-    Up to 17:00, the result stays on the same date and does not exceed 17:00.
-    For an original timestamp at or after 17:00, the result is 1-10 minutes
-    after that timestamp as requested by the user.
-    """
+    """Generate 1-10 minutes later, keeping the initial entry's date."""
     generator = rng or random.SystemRandom()
     initial = _parse_timestamp(initial_value)
-    work_end = datetime.combine(initial.date(), time(hour=17))
-
-    if initial < work_end:
-        remaining_minutes = int((work_end - initial).total_seconds() // 60)
-        if remaining_minutes <= 0:
-            generated = work_end
-        else:
-            generated = initial + timedelta(minutes=generator.randint(1, remaining_minutes))
-            if generated > work_end:
-                generated = work_end
-    else:
-        generated = initial + timedelta(minutes=generator.randint(1, 10))
-
-    return generated.strftime("%Y-%m-%d %H:%M")
+    day_end = initial.replace(hour=23, minute=59, second=59)
+    available_minutes = min(10, int((day_end - initial).total_seconds() // 60))
+    generated = initial
+    if available_minutes > 0:
+        generated += timedelta(minutes=generator.randint(1, available_minutes))
+    output_format = "%Y-%m-%d %H:%M:%S" if initial_value.strip().count(":") == 2 else "%Y-%m-%d %H:%M"
+    return generated.strftime(output_format)
 
 
 def default_output_path(input_path: Path) -> Path:
@@ -148,7 +138,7 @@ def _clean_font_name(font_dict) -> str:
     return base_font
 
 
-def _find_date_box(page, page_number: int) -> PdfDateLocation | None:
+def _find_date_boxes(page, page_number: int) -> tuple[PdfDateLocation, ...]:
     fragments: list[tuple[str, float, float, float, str]] = []
 
     def collect(text_value, _cm, tm, font_dict, font_size) -> None:
@@ -165,14 +155,15 @@ def _find_date_box(page, page_number: int) -> PdfDateLocation | None:
             )
 
     page.extract_text(visitor_text=collect)
+    locations: list[PdfDateLocation] = []
     for text_value, x, y, font_size, font_name in fragments:
         if text_value.upper().startswith("DATE:"):
             inline_value = text_value[5:].strip()
             if PRINTED_DATE_RE.match(inline_value):
                 value_x = x + (font_size * 2.5) + 18.0
-                return PdfDateLocation(
+                locations.append(PdfDateLocation(
                     page_number, inline_value, font_name, value_x, y, font_size
-                )
+                ))
 
     labels = [fragment for fragment in fragments if fragment[0].upper() == "DATE:"]
     for _label_text, label_x, label_y, _label_size, _label_font in labels:
@@ -187,11 +178,36 @@ def _find_date_box(page, page_number: int) -> PdfDateLocation | None:
             key=lambda fragment: fragment[1],
         )
         if candidates:
-            old_value, x, y, font_size, font_name = candidates[0]
-            return PdfDateLocation(
-                page_number, old_value, font_name, x, y, font_size
+            # Prefer the latest overlay at this position when re-editing.
+            leftmost_x = candidates[0][1]
+            old_value, x, y, font_size, font_name = next(
+                fragment for fragment in reversed(candidates)
+                if abs(fragment[1] - leftmost_x) < 0.1
             )
-    return None
+            locations.append(PdfDateLocation(
+                page_number, old_value, font_name, x, y, font_size
+            ))
+
+    locations.sort(key=lambda location: (-location.baseline_y, location.x))
+    entries: list[tuple[str, float]] = []
+    for text_value, _x, y, _size, _font in fragments:
+        if not re.search(r"최초\s*입력일|INITIAL\s*ENTRY", text_value, re.IGNORECASE):
+            continue
+        line = " ".join(fragment[0] for fragment in sorted(
+            (fragment for fragment in fragments if abs(fragment[2] - y) <= 2.5),
+            key=lambda fragment: fragment[1],
+        ))
+        match = INITIAL_ENTRY_RE.search(line)
+        if match:
+            entries.append((normalize_date_value(match.group(1)), y))
+    associated: list[PdfDateLocation] = []
+    for index, location in enumerate(locations):
+        next_header_y = locations[index + 1].baseline_y if index + 1 < len(locations) else float("-inf")
+        candidates = [entry for entry in entries if next_header_y < entry[1] < location.baseline_y]
+        if len(candidates) > 1:
+            raise ValueError(f"{page_number}페이지 {index + 1}번째 전표의 최초입력일이 여러 개입니다.")
+        associated.append(replace(location, initial_value=candidates[0][0] if candidates else ""))
+    return tuple(associated)
 
 
 def read_pdf_date_info(input_path: Path | str) -> PdfDateInfo:
@@ -208,9 +224,7 @@ def read_pdf_date_info(input_path: Path | str) -> PdfDateInfo:
     locations: list[PdfDateLocation] = []
     initial_entries: list[str] = []
     for page_number, page in enumerate(reader.pages, start=1):
-        location = _find_date_box(page, page_number)
-        if location is not None:
-            locations.append(location)
+        locations.extend(_find_date_boxes(page, page_number))
         page_text = " ".join((page.extract_text() or "").split())
         for match in INITIAL_ENTRY_RE.finditer(page_text):
             normalized = normalize_date_value(match.group(1))
@@ -292,7 +306,7 @@ def _create_overlay_page(page, location: PdfDateLocation, value: str):
 def replace_pdf_date_label(
     input_path: Path | str,
     output_path: Path | str,
-    new_value: str,
+    new_value: str | tuple[str, ...],
 ) -> PdfDateEditResult:
     """Replace printed values following ``DATE:`` and preserve the source file."""
     source = Path(input_path).expanduser().resolve()
@@ -301,20 +315,24 @@ def replace_pdf_date_label(
         raise ValueError("원본을 보호하기 위해 출력 파일은 다른 이름으로 지정하세요.")
 
     info = read_pdf_date_info(source)
-    printed_value = normalize_date_value(new_value)
+    if isinstance(new_value, str):
+        printed_values = (normalize_date_value(new_value),) * len(info.locations)
+    else:
+        if len(new_value) != len(info.locations):
+            raise ValueError("전표 수와 수정 DATE 값의 수가 일치하지 않습니다.")
+        printed_values = tuple(normalize_date_value(value) for value in new_value)
     writer = PdfWriter(clone_from=str(source))
-    locations_by_page = {location.page_number: location for location in info.locations}
     changed_pages: list[int] = []
     old_values: list[str] = []
     matched_flags: list[bool] = []
 
-    for page_number, page in enumerate(writer.pages, start=1):
-        location = locations_by_page.get(page_number)
-        if location is None:
-            continue
+    for location, printed_value in zip(info.locations, printed_values):
+        page_number = location.page_number
+        page = writer.pages[page_number - 1]
         overlay_page, matched = _create_overlay_page(page, location, printed_value)
         page.merge_page(overlay_page, over=True, expand=False)
-        changed_pages.append(page_number)
+        if page_number not in changed_pages:
+            changed_pages.append(page_number)
         old_values.append(location.value)
         matched_flags.append(matched)
 
@@ -331,8 +349,11 @@ def replace_pdf_date_label(
             writer.write(temp_stream)
 
         reopened = PdfReader(str(temp_path))
-        if len(reopened.pages) != info.page_count:
-            raise RuntimeError("저장된 PDF의 페이지 수 검증에 실패했습니다.")
+        try:
+            if len(reopened.pages) != info.page_count:
+                raise RuntimeError("저장된 PDF의 페이지 수 검증에 실패했습니다.")
+        finally:
+            reopened.close()
         os.replace(temp_path, destination)
         temp_path = None
     finally:
@@ -343,7 +364,8 @@ def replace_pdf_date_label(
         output_path=destination,
         changed_pages=tuple(changed_pages),
         old_values=tuple(old_values),
-        new_value=printed_value,
+        new_value=printed_values[0] if len(set(printed_values)) == 1 else "전표별 개별 적용",
         source_fonts=info.font_names,
         font_matched=all(matched_flags),
+        new_values=printed_values,
     )

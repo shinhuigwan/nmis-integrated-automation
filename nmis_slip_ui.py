@@ -19,6 +19,15 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
+# pythonw.exe has no console streams. CustomTkinter writes a startup warning to
+# stderr on some Windows installations, so keep a real stream available.
+if sys.stderr is None or sys.stdout is None:
+    _startup_log = open(Path(__file__).with_name("startup.log"), "a", encoding="utf-8", buffering=1)
+    if sys.stderr is None:
+        sys.stderr = _startup_log
+    if sys.stdout is None:
+        sys.stdout = _startup_log
+
 import customtkinter as ctk
 import openpyxl
 import pandas as pd
@@ -1617,7 +1626,7 @@ class ModernSlipUI(ctk.CTk):
         ctk.CTkLabel(
             card,
             text=(
-                "PDF를 한 개 또는 여러 개 선택하면 문서 하단의 최초입력일과 원본 글꼴을 읽습니다. "
+                "각 페이지의 위·아래 전표를 각각 읽고, 전표별 최초입력일과 원본 글꼴을 확인합니다. "
                 "중앙 전표일자와 원본 파일은 변경하지 않습니다."
             ),
             font=ctk.CTkFont(family="맑은 고딕", size=11),
@@ -1684,7 +1693,7 @@ class ModernSlipUI(ctk.CTk):
         ).pack(side="left", padx=(0, 8))
         ctk.CTkButton(
             edit_row,
-            text="🎲 최초 입력일 이후 랜덤",
+            text="🎲 전표별 10분 이내 랜덤",
             width=180,
             fg_color="#7C3AED",
             hover_color="#6D28D9",
@@ -1720,7 +1729,7 @@ class ModernSlipUI(ctk.CTk):
         table_box.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             table_box,
-            text="PDF별 최초 입력일 / 수정 입력일",
+            text="전표별 최초 입력일 / 수정 DATE",
             font=ctk.CTkFont(family="맑은 고딕", size=14, weight="bold"),
             text_color="#CBD5E1",
         ).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 8))
@@ -1734,7 +1743,7 @@ class ModernSlipUI(ctk.CTk):
             height=9,
         )
         headings = {
-            "file": "파일명",
+            "file": "파일명 / 페이지 / 전표",
             "initial": "최초 입력일",
             "new": "수정 입력일",
             "font": "원본 글꼴",
@@ -1757,8 +1766,8 @@ class ModernSlipUI(ctk.CTk):
         ctk.CTkLabel(
             table_box,
             text=(
-                "랜덤 규칙: 문서 하단 최초입력일보다 뒤의 같은 날 시간으로 생성하며 17:00을 넘지 않습니다. "
-                "최초 입력일이 17:00 이후이면 그 시각부터 1~10분 뒤로 생성합니다."
+                "랜덤 규칙: 각 전표의 최초입력일에서 1~10분 뒤로 생성합니다. 날짜는 유지합니다. "
+                "자정 직전에는 같은 날짜 안에서 생성하며, 23:59이면 그 시각을 유지합니다."
             ),
             justify="left",
             wraplength=780,
@@ -1794,16 +1803,22 @@ class ModernSlipUI(ctk.CTk):
             for index, source in enumerate(paths, start=1):
                 try:
                     info = read_pdf_date_info(source)
-                    loaded.append(
-                        {
-                            "source": source,
-                            "initial": info.initial_value,
-                            "new": "",
-                            "font": ", ".join(info.font_names),
-                            "status": "대기" if info.initial_value else "최초입력일 없음",
-                            "error": "",
-                        }
-                    )
+                    page_counts: dict[int, int] = {}
+                    for location_index, location in enumerate(info.locations):
+                        page_counts[location.page_number] = page_counts.get(location.page_number, 0) + 1
+                        loaded.append(
+                            {
+                                "source": source,
+                                "page": location.page_number,
+                                "voucher": page_counts[location.page_number],
+                                "location_index": location_index,
+                                "initial": location.initial_value,
+                                "new": "",
+                                "font": location.font_name,
+                                "status": "대기" if location.initial_value else "최초입력일 없음",
+                                "error": "",
+                            }
+                        )
                 except Exception as exc:
                     loaded.append(
                         {
@@ -1827,7 +1842,7 @@ class ModernSlipUI(ctk.CTk):
                 self._refresh_pdf_date_tree()
                 valid_count = sum(bool(item["initial"]) for item in loaded)
                 self.pdf_date_status_var.set(
-                    f"최초 입력일 확인 완료: {valid_count}/{len(loaded)}개"
+                    f"최초 입력일 확인 완료: 전표 {valid_count}/{len(loaded)}건"
                 )
                 if valid_count == 1:
                     initial = next(item["initial"] for item in loaded if item["initial"])
@@ -1845,7 +1860,7 @@ class ModernSlipUI(ctk.CTk):
                 "end",
                 iid=str(index),
                 values=(
-                    item["source"].name,
+                    f"{item['source'].name} / {item['page']}p / {item['voucher']}번" if "page" in item else item["source"].name,
                     item["initial"],
                     item["new"],
                     item["font"],
@@ -1880,50 +1895,56 @@ class ModernSlipUI(ctk.CTk):
             try:
                 item["new"] = generate_random_date_value(item["initial"])
                 item["status"] = "랜덤 생성"
+                item["error"] = ""
                 generated_count += 1
             except Exception as exc:
                 item["status"] = "랜덤 실패"
                 item["error"] = str(exc)
         self._refresh_pdf_date_tree()
-        self.pdf_date_status_var.set(f"랜덤 입력일 생성 완료: {generated_count}개")
+        self.pdf_date_status_var.set(f"전표별 랜덤 생성 완료: {generated_count}건")
 
     def start_pdf_date_edit(self) -> None:
         if not self.pdf_date_items:
             messagebox.showerror("PDF 파일 오류", "원본 PDF 파일을 선택하세요.", parent=self)
             return
-        pending = [item for item in self.pdf_date_items if item["new"] and not item["error"]]
+        grouped: dict[Path, list[dict[str, Any]]] = {}
+        for item in self.pdf_date_items:
+            grouped.setdefault(item["source"], []).append(item)
+        pending = [items for items in grouped.values() if all(item["new"] and not item["error"] for item in items)]
         if not pending:
             messagebox.showerror(
                 "수정 입력일 없음",
-                "[랜덤 입력] 또는 [전체 적용]으로 수정 입력일을 먼저 만드세요.",
+                "모든 전표의 수정값이 필요합니다. 최초입력일을 확인하고 [전표별 10분 이내 랜덤] 또는 [전체 적용]을 누르세요.",
                 parent=self,
             )
             return
         output_text = self.pdf_output_dir_var.get().strip()
-        output_dir = Path(output_text).expanduser() if output_text else pending[0]["source"].parent
+        output_dir = Path(output_text).expanduser() if output_text else pending[0][0]["source"].parent
         self.pdf_date_status_var.set(f"일괄 처리 중... 0/{len(pending)}")
 
         def worker() -> None:
             success_count = 0
-            failures: list[str] = []
-            for current, item in enumerate(pending, start=1):
-                source = item["source"]
+            failures: list[str] = [f"{source.name}: 일부 전표의 수정값이 없거나 확인에 실패했습니다." for source, items in grouped.items() if items not in pending]
+            for current, items in enumerate(pending, start=1):
+                source = items[0]["source"]
                 destination = output_dir / default_output_path(source).name
                 try:
-                    result = replace_pdf_date_label(source, destination, item["new"])
-                    item["status"] = "저장 완료"
-                    item["error"] = ""
+                    result = replace_pdf_date_label(source, destination, tuple(item["new"] for item in items))
+                    for item in items:
+                        item["status"] = "저장 완료"
+                        item["error"] = ""
                     success_count += 1
                     font_text = ", ".join(result.source_fonts)
                     font_status = "원본 글꼴 일치" if result.font_matched else "대체 글꼴 사용"
                     self.log(
                         f"PDF DATE 수정 완료 [{source.name}]: "
-                        f"최초입력일 {item['initial'] or '없음'} / DATE → "
-                        f"{result.new_value} / {font_text} ({font_status})"
+                        f"{len(result.changed_pages)}페이지 / 전표 {len(result.new_values)}건 개별 적용 / "
+                        f"{font_text} ({font_status})"
                     )
                 except Exception as exc:
-                    item["status"] = "저장 실패"
-                    item["error"] = str(exc)
+                    for item in items:
+                        item["status"] = "저장 실패"
+                        item["error"] = str(exc)
                     failures.append(f"{source.name}: {exc}")
                     self.log(f"❌ PDF DATE 수정 실패 [{source.name}]: {exc}")
                 self.after(0, self._refresh_pdf_date_tree)

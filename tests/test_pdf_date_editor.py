@@ -6,6 +6,7 @@ from pathlib import Path
 
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+from reportlab.pdfgen import canvas
 
 from pdf_date_editor import (
     default_output_path,
@@ -98,7 +99,7 @@ class PdfDateEditorTests(unittest.TestCase):
             self.assertEqual(info.font_names, ("Helvetica",))
             self.assertEqual(info.locations[0].font_size, 9.0)
 
-    def test_random_time_before_17_stays_same_day_and_not_after_17(self):
+    def test_random_time_before_17_is_within_next_10_minutes(self):
         generated = generate_random_date_value(
             "2026-09-01 15:09",
             rng=random.Random(7),
@@ -106,7 +107,61 @@ class PdfDateEditorTests(unittest.TestCase):
         initial_dt = datetime.strptime("2026-09-01 15:09", "%Y-%m-%d %H:%M")
         generated_dt = datetime.strptime(generated, "%Y-%m-%d %H:%M")
         self.assertGreater(generated_dt, initial_dt)
-        self.assertLessEqual(generated_dt, datetime(2026, 9, 1, 17, 0))
+        self.assertLessEqual((generated_dt - initial_dt).total_seconds(), 600)
+
+    def test_random_times_keep_date_and_seconds(self):
+        for initial in ("2026-09-01 09:00", "2026-09-01 16:59", "2026-09-01 23:55", "2026-09-01 23:59", "2026-09-01 23:59:31"):
+            for seed in range(20):
+                generated = datetime.fromisoformat(generate_random_date_value(initial, random.Random(seed)))
+                original = datetime.fromisoformat(initial)
+                self.assertEqual(generated.date(), original.date())
+                self.assertGreaterEqual((generated - original).total_seconds(), 0)
+                self.assertLessEqual((generated - original).total_seconds(), 600)
+
+    @staticmethod
+    def _create_multi_vouchers(path, missing_top=False):
+        output = canvas.Canvas(str(path), pagesize=(595.28, 841.89))
+        for page_index in range(2):
+            for voucher_index, header in enumerate((765, 347)):
+                output.setFont("Helvetica", 9)
+                output.drawString(443.5, header, "DATE:")
+                output.drawString(484, header, "2026-10-14 11:33")
+                if not (missing_top and page_index == 0 and voucher_index == 0):
+                    initial = f"2026-04-{14 + page_index:02d} 13:0{voucher_index}"
+                    output.drawString(108, header - 327, f"INITIAL ENTRY: {initial}")
+            output.showPage()
+        output.save()
+
+    def test_each_voucher_on_every_page_uses_its_own_initial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, output = Path(directory) / "source.pdf", Path(directory) / "output.pdf"
+            self._create_multi_vouchers(source)
+            original = source.read_bytes()
+            info = read_pdf_date_info(source)
+            self.assertEqual([item.page_number for item in info.locations], [1, 1, 2, 2])
+            self.assertEqual([item.initial_value for item in info.locations], [
+                "2026-04-14 13:00", "2026-04-14 13:01", "2026-04-15 13:00", "2026-04-15 13:01",
+            ])
+            values = tuple(generate_random_date_value(item.initial_value, random.Random(i)) for i, item in enumerate(info.locations))
+            result = replace_pdf_date_label(source, output, values)
+            self.assertEqual(result.changed_pages, (1, 2))
+            self.assertEqual(result.new_values, values)
+            self.assertEqual(tuple(item.value for item in read_pdf_date_info(output).locations), values)
+            self.assertEqual(source.read_bytes(), original)
+            replace_pdf_date_label(output, Path(directory) / "common.pdf", "2026-04-16 10:00")
+            self.assertEqual([item.value for item in read_pdf_date_info(Path(directory) / "common.pdf").locations], ["2026-04-16 10:00"] * 4)
+
+    def test_missing_footer_does_not_use_another_vouchers_initial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.pdf"
+            self._create_multi_vouchers(source, missing_top=True)
+            info = read_pdf_date_info(source)
+            self.assertEqual(info.locations[0].initial_value, "")
+            self.assertEqual(info.locations[1].initial_value, "2026-04-14 13:01")
+            output = Path(directory) / "output.pdf"
+            with self.assertRaisesRegex(ValueError, "일치"):
+                replace_pdf_date_label(source, output, ("2026-04-14 13:05",))
+            self.assertFalse(output.exists())
 
     def test_random_time_after_17_is_within_next_10_minutes(self):
         generated = generate_random_date_value(
