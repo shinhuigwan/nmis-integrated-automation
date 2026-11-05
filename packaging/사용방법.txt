@@ -2,6 +2,7 @@ NMIS 통합 자동화 시스템 — Windows 10/11 64비트 배포판
 
 1. ZIP 파일을 바탕화면이나 문서 폴더에 완전히 압축 해제합니다.
 2. NMIS-Automation.exe를 실행합니다. Python과 Python 패키지는 설치할 필요가 없습니다.
+   첫 실행 시 바탕화면에 '통합 자동화 시스템' 바로가기가 자동 생성됩니다.
 3. Chrome이 없거나 바탕화면 바로가기가 필요하면 Setup.bat를 실행합니다.
    Google 공식 Chrome 설치 파일이 installers 폴더에 동봉되어 있습니다.
    Chrome 설치와 NMIS 접속에는 인터넷 연결이 필요합니다.

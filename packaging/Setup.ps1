@@ -29,10 +29,13 @@ if (-not $Chrome) {
 $Exe = Join-Path $AppRoot 'NMIS-Automation.exe'
 if (-not (Test-Path -LiteralPath $Exe)) { throw 'Extract the entire ZIP before running Setup.bat.' }
 $Shell = New-Object -ComObject WScript.Shell
-$Shortcut = $Shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) 'NMIS Integrated Automation.lnk'))
-$Shortcut.TargetPath = $Exe
-$Shortcut.WorkingDirectory = $AppRoot
-$Shortcut.IconLocation = "$Exe,0"
-$Shortcut.Save()
+$KoreanName = [string]::Concat([char]0xD1B5,[char]0xD569,' ',[char]0xC790,[char]0xB3D9,[char]0xD654,' ',[char]0xC2DC,[char]0xC2A4,[char]0xD15C,'.lnk')
+foreach ($Name in @($KoreanName,'NMIS Integrated Automation.lnk')) {
+    $Shortcut = $Shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) $Name))
+    $Shortcut.TargetPath = $Exe
+    $Shortcut.WorkingDirectory = $AppRoot
+    $Shortcut.IconLocation = "$Exe,0"
+    $Shortcut.Save()
+}
 Write-Host 'Setup completed. Start NMIS-Automation.exe or the desktop shortcut.'
 Write-Host 'Licensed Microsoft Excel and Hancom Hangul must be installed separately for their respective features.'

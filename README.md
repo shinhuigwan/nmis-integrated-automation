@@ -113,7 +113,7 @@ Python 설치가 필요 없습니다. Chrome 설치 파일과 바로가기 생�
 ### Windows 실행용 배포판 (추천)
 
 1. [최신 실행용 ZIP](https://github.com/shinhuigwan/nmis-integrated-automation/releases/latest/download/NMIS-Automation-Windows-x64.zip)을 다운로드합니다. GitHub의 `Code → Download ZIP`은 개발용 소스입니다.
-2. 바탕화면이나 문서 폴더에 **전체 압축을 해제**하고 `NMIS-Automation.exe`를 실행합니다. `_internal` 폴더도 함께 유지하세요.
+2. 바탕화면이나 문서 폴더에 **전체 압축을 해제**하고 `NMIS-Automation.exe`를 실행합니다. 처음 실행할 때 바탕화면에 **통합 자동화 시스템** 바로가기가 자동으로 생성됩니다. `_internal` 폴더도 함께 유지하세요.
 3. Chrome이 없거나 바탕화면 바로가기가 필요하면 `Setup.bat`를 실행합니다. 동봉된 Google 공식 서명 설치 파일을 사용하며 Chrome 설치 시 인터넷이 필요합니다.
 4. 계정 설정에서 새 PC의 NMIS 계정을 입력하고 체크한 뒤 `Chrome 연결 열기`를 누릅니다.
 

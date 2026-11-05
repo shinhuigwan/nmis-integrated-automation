@@ -48,4 +48,11 @@ if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] in {"--self-test", "--update-probe"}:
         raise SystemExit(self_test(sys.argv[2], gui=sys.argv[1] == "--self-test"))
     from nmis_slip_ui import main
+    if getattr(sys, "frozen", False):
+        try:
+            from app_paths import APP_ROOT
+            from desktop_shortcuts import ensure_desktop_shortcuts
+            ensure_desktop_shortcuts(APP_ROOT)
+        except Exception:
+            traceback.print_exc()
     main()
