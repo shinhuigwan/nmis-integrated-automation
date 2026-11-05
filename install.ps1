@@ -24,7 +24,7 @@ function Test-Python([string]$Path) {
         return $false
     }
     try {
-        & $Path -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" 2>$null
+        & $Path -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" 2>$null
         return $LASTEXITCODE -eq 0
     } catch {
         return $false
@@ -124,7 +124,7 @@ if (-not (Test-Path -LiteralPath $Requirements)) {
 Write-Step "Checking prerequisites"
 $Python = Find-Python
 $Chrome = Find-Chrome
-Write-Host ("Python 3.10 or newer: " + $(if ($Python) { $Python } else { "Not found" }))
+Write-Host ("Python 3.11 or newer: " + $(if ($Python) { $Python } else { "Not found" }))
 Write-Host ("Google Chrome: " + $(if ($Chrome) { $Chrome } else { "Not found" }))
 
 if ($VerifyOnly) {

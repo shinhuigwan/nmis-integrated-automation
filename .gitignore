@@ -12,3 +12,9 @@ data/
 NMIS_접수대장/
 nmis_slip_ui_backup.py
 settings.json
+build/
+dist/
+*.spec
+_internal/
+NMIS-Automation.exe
+installers/

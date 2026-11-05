@@ -1,5 +1,10 @@
 # ⚡ NMIS (통합) 전표 & 월보고 자동화 시스템 (Modern Dark Edition)
 
+**다른 PC에서 바로 사용:** [Windows 실행용 ZIP 다운로드](https://github.com/shinhuigwan/nmis-integrated-automation/releases/latest/download/NMIS-Automation-Windows-x64.zip) → 전체 압축 해제 → `NMIS-Automation.exe` 실행.
+Python 설치가 필요 없습니다. Chrome 설치 파일과 바로가기 생성 도구가 동봉되어 있습니다.
+
+이후 업데이트는 프로그램 왼쪽 **`업데이트 확인`**에서 다운로드·설치할 수 있습니다. 검증을 통과한 새 버전으로 재실행하며, `settings.json`과 `data`의 계정·배포 명단·날짜·접수 이력은 보존합니다.
+
 > **한국외식업중앙회 통합 회계 및 회원 관리 시스템 (NMIS)** 과 **월보고 엑셀 파일** 간의 데이터를 실시간으로 수집·기입·검수하고, **발송대장 5건 자동 등록** 및 **전표 자동 기입**을 지원하는 럭셔리 다크 모드 자동화 프로그램입니다.
 
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)
@@ -66,6 +71,19 @@
 
 ---
 
+### 8. 📚 음식과사람 배포내역 등록
+* `계정 및 시스템 설정`에서 NMIS 계정을 최대 3개 저장하고 `Chrome 로그인에 사용`을 체크합니다. `Chrome 연결 열기`를 누르면 체크한 계정이 1개일 때 바로 연결하고, 2개 이상일 때는 로그인할 계정을 선택하는 창을 표시합니다. 로그인 확인이 끝난 계정으로 모든 자동화와 계정별 배포 명단을 연결합니다. 비밀번호는 Windows DPAPI로 암호화해 로컬 `data/account_profiles.json`에 저장합니다.
+* `음식과사람 배포`의 `배포1`~`배포5` 탭에 계정별 명단을 저장합니다. `명단 조회·체크·저장`을 누르면 업소 팝업에서 체크·검색·저장할 수 있습니다.
+* 다른 배포 탭에 저장한 업소는 선택 목록에서 제외합니다. 기존 탭에서 해제하여 저장하면 다른 탭에서 선택할 수 있습니다. 저장 명단은 다음 달에도 유지됩니다.
+* 명단 팝업 상단에서 `배포1`~`배포5`를 전환하고 탭별 배포일자를 입력합니다. `데이터 저장`은 다섯 탭의 명단과 날짜를 함께 보관하고, `데이터 불러오기`는 마지막 저장 상태를 복원합니다.
+* 체크한 명단은 체크 목록 위의 `저장할 배포 탭`에서 배포1~배포5를 선택한 뒤 `데이터 저장`으로 지정할 수 있습니다. 다른 탭을 선택하면 체크 명단을 그 탭으로 이동하며, 대상 탭의 기존 명단은 유지합니다.
+* 메인 화면의 `저장 데이터 불러오기`로 NMIS 재조회 없이 저장 명단을 열 수 있습니다. 다음 달 사용 시 저장된 날짜를 해당 월의 배포일자로 변경하세요. 저장명단 배포에서는 체크한 각 탭의 저장 날짜를 해당 업소별로 적용합니다.
+* 배포일자 옆에서 `랜덤배포` 또는 `저장명단 배포`를 선택합니다. `랜덤배포`는 조회된 전체 미배포 대상에서 입력 부수만큼 무작위로 뽑고 옆의 배포일자를 적용합니다.
+* `저장명단 배포`는 배포1~배포5를 다중 체크합니다. 체크한 탭의 미배포 명단 전체에 각 탭에 저장한 날짜를 적용하며, 공통 부수·배포일자 입력은 사용하지 않습니다. 예를 들어 배포1·배포3만 체크하면 두 명단만 각자의 날짜로 처리합니다.
+* 사이트의 지회·지부·직무담당·지역 조회 조건은 유지합니다. 대상이 부족하면 입력을 중단하고 가능 부수를 안내합니다.
+* 결과를 확인한 뒤 `② 입력한 배포내역 등록`을 누르면 NMIS 등록 및 확인 팝업까지 처리합니다.
+* 이미 배포된 업소는 제외하며, 등록 직전에 선택 수·날짜·조회 조건을 재검증합니다.
+
 ## 🖥️ 프로그램 화면 구성
 
 ```
@@ -92,19 +110,38 @@
 
 ## 📦 다운로드 및 설치 방법 (Installation)
 
-### Windows 원클릭 자동 설치 (추천)
+### Windows 실행용 배포판 (추천)
+
+1. [최신 실행용 ZIP](https://github.com/shinhuigwan/nmis-integrated-automation/releases/latest/download/NMIS-Automation-Windows-x64.zip)을 다운로드합니다. GitHub의 `Code → Download ZIP`은 개발용 소스입니다.
+2. 바탕화면이나 문서 폴더에 **전체 압축을 해제**하고 `NMIS-Automation.exe`를 실행합니다. `_internal` 폴더도 함께 유지하세요.
+3. Chrome이 없거나 바탕화면 바로가기가 필요하면 `Setup.bat`를 실행합니다. 동봉된 Google 공식 서명 설치 파일을 사용하며 Chrome 설치 시 인터넷이 필요합니다.
+4. 계정 설정에서 새 PC의 NMIS 계정을 입력하고 체크한 뒤 `Chrome 연결 열기`를 누릅니다.
+
+Python, Playwright 드라이버와 필수 Python 라이브러리는 실행본에 포함되어 있습니다. 개인 계정·비밀번호·배포 명단은 포함하지 않습니다. 월보고 Excel 기능에는 Microsoft Excel, HWP 처리에는 한컴오피스 한글이 별도로 필요합니다.
+
+### 개발용 소스에서 자동 설치
 
 저장소를 ZIP으로 내려받아 압축을 푼 뒤 **`설치하기.bat`**를 더블클릭합니다. 한글 파일명이 깨지는 환경에서는 동일한 설치 파일인 **`install.bat`**를 실행하면 됩니다.
 
 설치 파일이 다음 작업을 자동으로 수행합니다.
 
-* Python 3.10 이상이 없으면 Python 3.12 설치
+* Python 3.11 이상이 없으면 Python 3.12 설치
 * Google Chrome이 없으면 Chrome 설치
 * 프로젝트 전용 `.venv` 가상환경 생성
 * `requirements.txt`의 Python 패키지 전체 설치 및 검증
 * 바탕화면에 전용 아이콘이 적용된 **`통합 자동화 시스템`** 바로가기 생성
 
 Microsoft Excel과 한컴오피스 한글은 유료 프로그램이므로 자동 설치 대상이 아닙니다. 월보고/Excel COM 기능에는 Microsoft Excel, HWP 접수번호 입력에는 한컴오피스 한글이 각각 설치되어 있어야 합니다. 네이버 메일 앱 비밀번호는 Windows 사용자별 DPAPI로 암호화되므로 새 PC에서 한 번 다시 입력해야 합니다.
+
+### 실행용 ZIP 빌드 (개발자)
+
+Windows 64비트 Python 3.11 가상환경에서 `pip install -r requirements-build.txt` 후 `build_portable.ps1 -Python <가상환경의 python.exe 경로>`를 실행합니다. 고정된 의존성 버전은 `requirements-portable.lock`에 기록되어 있습니다. `dist/NMIS-Automation` 폴더가 생성되며 사용자 `settings.json`, `data`, 로그를 넣지 않고 배포합니다.
+
+`python tools/package_portable.py dist/NMIS-Automation dist/NMIS-Automation-Windows-x64.zip`으로 사용자 데이터를 제외한 업데이트 ZIP과 SHA-256 파일을 생성합니다. 두 파일을 같은 GitHub Release에 올려야 프로그램 내부 업데이트가 가능합니다.
+
+`.github/workflows/portable-release.yml`은 `main`의 프로그램 코드 변경 시 Windows 빌드·테스트·실행 검증 후 새 Release를 자동 게시합니다. `Actions → Build and publish Windows app → Run workflow`로 수동 게시할 수도 있습니다. 새 실행본의 버전은 한국 날짜와 워크플로 실행 번호로 자동 지정됩니다.
+
+업데이트는 다운로드 파일의 SHA-256과 새 실행본의 시작 검증을 통과한 뒤 적용합니다. 별도 도우미가 기존 앱 종료를 기다린 후 실행 파일·라이브러리만 교체합니다. 교체 오류 시 백업한 기존 파일을 복원하며, 로그는 `update.log` 또는 임시 업데이트 폴더의 `update-error.log`에 남습니다.
 
 ### 1. Repository 클론 및 폴더 이동
 ```bash

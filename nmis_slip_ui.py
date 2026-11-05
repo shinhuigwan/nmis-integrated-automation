@@ -18,11 +18,13 @@ import urllib.request
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
+from app_paths import APP_ROOT, RESOURCE_ROOT
+from app_version import APP_VERSION
 
 # pythonw.exe has no console streams. CustomTkinter writes a startup warning to
 # stderr on some Windows installations, so keep a real stream available.
 if sys.stderr is None or sys.stdout is None:
-    _startup_log = open(Path(__file__).with_name("startup.log"), "a", encoding="utf-8", buffering=1)
+    _startup_log = open(APP_ROOT / "startup.log", "a", encoding="utf-8", buffering=1)
     if sys.stderr is None:
         sys.stderr = _startup_log
     if sys.stdout is None:
@@ -48,7 +50,7 @@ from nmis_slip_automation import (
     fill_monthly_member_and_revenue_report,
     fill_monthly_report_from_nmis,
     fill_staff_join_excel_from_data,
-    find_nmis_page,
+    find_nmis_page as _find_nmis_page,
     navigate_to_slip_management,
     register_ship_documents_on_nmis,
     verify_member_info_from_nmis,
@@ -85,6 +87,8 @@ from membership_fee_register import (
     parse_fee_payment_excel,
     register_fee_payment_on_nmis,
 )
+from food_distribution import MEMBER_TYPES, lookup_distribution, prepare_distribution, prepare_saved_distribution, saved_groups_plan, save_distribution, validate_request
+from local_profiles import ProfileStore, require_session_account, assign_distribution_members
 from pdf_date_editor import (
     default_output_path,
     generate_random_date_value,
@@ -119,9 +123,9 @@ ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
 # ── 설정 파일 및 글로벌 변수 ────────────────────────────────────────────────
-SETTINGS_FILE = Path(__file__).parent / "settings.json"
-APP_ICON_ICO = Path(__file__).parent / "assets" / "nmis_automation.ico"
-APP_ICON_PNG = Path(__file__).parent / "assets" / "nmis_automation.png"
+SETTINGS_FILE = APP_ROOT / "settings.json"
+APP_ICON_ICO = RESOURCE_ROOT / "assets" / "nmis_automation.ico"
+APP_ICON_PNG = RESOURCE_ROOT / "assets" / "nmis_automation.png"
 APP_USER_MODEL_ID = "shin.nmis.integrated-automation"
 
 # 로그인 정보는 Git에 포함하지 않고 로컬 settings.json(또는 환경 변수)에서만 읽습니다.
@@ -205,12 +209,28 @@ def get_excel_column_headers(file_path: str) -> list[dict]:
         print(f"헤더 읽기 예외: {e}")
         return []
 
+PROFILE_STORE = None
+CONNECTION_BUSY = False
+
+
+def apply_active_profile():
+    global NMIS_USER_ID, NMIS_PASSWORD
+    NMIS_USER_ID, NMIS_PASSWORD = PROFILE_STORE.credentials() if PROFILE_STORE else ("", "")
+
+
+def find_nmis_page(target):
+    if CONNECTION_BUSY:
+        raise RuntimeError("Chrome 계정 연결 중입니다. 연결 완료 후 실행하세요.")
+    page = _find_nmis_page(target)
+    require_session_account(page, NMIS_USER_ID, NMIS_PASSWORD)
+    return page
+
+
 def load_settings() -> None:
     global KEYWORD_RULES, CONFIRM_SELECTORS, MACRO_STEPS, NMIS_USER_ID, NMIS_PASSWORD, SLIP_COLUMN_MAPPING, MEMBER_COLUMN_MAPPING, POTENTIAL_COLUMN_MAPPING, RECEIPT_SETTINGS, FEE_PAYMENT_SETTINGS
-    if not SETTINGS_FILE.is_file():
-        return
+    global PROFILE_STORE
     try:
-        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8")) if SETTINGS_FILE.is_file() else {}
         if "keyword_rules" in data:
             KEYWORD_RULES = data["keyword_rules"]
         if "confirm_selectors" in data:
@@ -233,7 +253,17 @@ def load_settings() -> None:
             FEE_PAYMENT_SETTINGS.update(data["fee_payment_settings"])
         if RECEIPT_SETTINGS.get("sender_filter") in {"", "한국외식업중앙회", "외식업전북지회"}:
             RECEIPT_SETTINGS["sender_filter"] = "krbajb5980@daum.net"
+        PROFILE_STORE = ProfileStore(SETTINGS_FILE.parent / "data" / "account_profiles.json")
+        PROFILE_STORE.migrate(NMIS_USER_ID, NMIS_PASSWORD)
+        apply_active_profile()
+        if "nmis_password" in data and PROFILE_STORE.accounts:
+            data.pop("nmis_password")
+            temp = SETTINGS_FILE.with_suffix(".tmp")
+            temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            temp.replace(SETTINGS_FILE)
     except Exception as e:
+        PROFILE_STORE = None
+        NMIS_USER_ID, NMIS_PASSWORD = "", ""
         print(f"설정 로드 실패: {e}")
 
 def save_settings() -> None:
@@ -242,7 +272,7 @@ def save_settings() -> None:
         "confirm_selectors": CONFIRM_SELECTORS,
         "macro_steps": MACRO_STEPS,
         "nmis_user_id": NMIS_USER_ID,
-        "nmis_password": NMIS_PASSWORD,
+        # Account passwords are saved as DPAPI ciphertext in data/account_profiles.json.
         "slip_column_mapping": SLIP_COLUMN_MAPPING,
         "member_column_mapping": MEMBER_COLUMN_MAPPING,
         "potential_column_mapping": POTENTIAL_COLUMN_MAPPING,
@@ -259,7 +289,7 @@ def cdp_is_ready() -> bool:
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.connect_over_cdp(CDP_URL)
-            page = find_nmis_page(browser)
+            page = _find_nmis_page(browser)
             return page is not None
     except Exception:
         return False
@@ -312,7 +342,7 @@ class ModernSlipUI(ctk.CTk):
         self.tx_type: dict[str, str] = {}
         self.tx_settings: dict[str, dict] = {}
         self.receipt_items: dict[str, ReceiptMailItem] = {}
-        self.receipt_history = ReceiptHistory(Path(__file__).parent / "data" / "receipt_history.sqlite3")
+        self.receipt_history = ReceiptHistory(APP_ROOT / "data" / "receipt_history.sqlite3")
         self.receipt_running = False
         self.receipt_checked_ids: set[str] = set()
         self.receipt_drag_check_value: bool | None = None
@@ -343,7 +373,7 @@ class ModernSlipUI(ctk.CTk):
     def _build_sidebar(self) -> None:
         self.sidebar = ctk.CTkFrame(self, width=220, corner_radius=0, fg_color="#141126")
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(9, weight=1)
+        self.sidebar.grid_rowconfigure(10, weight=1)
 
         # 로고
         logo_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
@@ -453,9 +483,15 @@ class ModernSlipUI(ctk.CTk):
         )
         self.btn_tab_pdf.grid(row=7, column=0, padx=16, pady=6, sticky="ew")
 
+        self.btn_tab_distribution = ctk.CTkButton(
+            self.sidebar, text="📚 음식과사람 배포", height=38,
+            fg_color="transparent", text_color="#CBD5E1",
+            command=lambda: self._select_tab("distribution"))
+        self.btn_tab_distribution.grid(row=8, column=0, padx=16, pady=4, sticky="ew")
+
         # Chrome Status Box in Sidebar
         status_box = ctk.CTkFrame(self.sidebar, fg_color="#1E1B3A", corner_radius=12)
-        status_box.grid(row=8, column=0, padx=16, pady=16, sticky="ew")
+        status_box.grid(row=9, column=0, padx=16, pady=16, sticky="ew")
 
         ctk.CTkLabel(
             status_box,
@@ -488,6 +524,11 @@ class ModernSlipUI(ctk.CTk):
             command=self.open_settings
         ).pack(fill="x", padx=12, pady=(0, 12))
 
+        self.btn_app_update = ctk.CTkButton(status_box, text="⬆ 업데이트 확인", height=30,
+                                          command=self.check_app_update)
+        self.btn_app_update.pack(fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(status_box, text=f"버전 {APP_VERSION}", font=ctk.CTkFont(size=10)).pack(pady=(0, 8))
+
     # ── 메인 영역 ────────────────────────────────────────────────────────────
 
     def _build_main_area(self) -> None:
@@ -517,6 +558,8 @@ class ModernSlipUI(ctk.CTk):
         self.tab_fee_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
         self.tab_pdf_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
 
+        self.tab_distribution_frame = ctk.CTkScrollableFrame(self.main_container, fg_color="transparent")
+        self._build_distribution_tab(self.tab_distribution_frame)
         self._build_monthly_tab(self.tab_monthly_frame)
         self._build_slip_tab(self.tab_slip_frame)
         self._build_member_tab(self.tab_member_frame)
@@ -539,6 +582,7 @@ class ModernSlipUI(ctk.CTk):
         self.tab_receipt_frame.grid_forget()
         self.tab_fee_frame.grid_forget()
         self.tab_pdf_frame.grid_forget()
+        self.tab_distribution_frame.grid_forget()
 
         self.btn_tab_monthly.configure(fg_color="transparent", text_color="#CBD5E1")
         self.btn_tab_slip.configure(fg_color="transparent", text_color="#CBD5E1")
@@ -548,7 +592,12 @@ class ModernSlipUI(ctk.CTk):
         self.btn_tab_fee.configure(fg_color="transparent", text_color="#CBD5E1")
         self.btn_tab_pdf.configure(fg_color="transparent", text_color="#CBD5E1")
 
-        if tab_name == "monthly":
+        self.btn_tab_distribution.configure(fg_color="transparent", text_color="#CBD5E1")
+        if tab_name == "distribution":
+            self.tab_distribution_frame.grid(row=1, column=0, padx=24, pady=10, sticky="nsew")
+            self.btn_tab_distribution.configure(fg_color="#8B5CF6", text_color="#FFFFFF")
+            self.main_title_label.configure(text="📚 음식과사람 배포내역 등록")
+        elif tab_name == "monthly":
             self.tab_monthly_frame.grid(row=1, column=0, padx=24, pady=10, sticky="nsew")
             self.btn_tab_monthly.configure(fg_color="#8B5CF6", text_color="#FFFFFF")
             self.main_title_label.configure(text="📊 월보고 자동 연동 시스템")
@@ -578,6 +627,167 @@ class ModernSlipUI(ctk.CTk):
             self.main_title_label.configure(text="📄 PDF DATE 일자수정")
 
     # ── [탭 2] 월보고 자동 연동 뷰 ──────────────────────────────────────────
+
+    def _build_distribution_tab(self, parent):
+        self.distribution_prepared = None
+        self.distribution_busy = False
+        self.distribution_group_labels = []
+        self.distribution_account_var = tk.StringVar()
+        self.distribution_mode_var = tk.StringVar(value="랜덤배포")
+        self.distribution_selected_groups = [tk.BooleanVar(value=False) for _ in range(5)]
+        self.distribution_group_checks = []
+        self.distribution_group_date_labels = []
+        self.distribution_type_var = tk.StringVar(value="전체")
+        self.distribution_count_var = tk.StringVar(value="100")
+        self.distribution_date_var = tk.StringVar(value=datetime.datetime.now().strftime("%Y%m%d"))
+        self.distribution_month_var = tk.StringVar(value=datetime.datetime.now().strftime("%Y%m"))
+        self.distribution_status_var = tk.StringVar(value="회원구분·부수·배포일자를 지정하세요.")
+        card = ctk.CTkFrame(parent, fg_color="#18152E", corner_radius=14)
+        card.pack(fill="x", pady=12)
+        ctk.CTkLabel(card, text="음식과사람 배포내역 등록", font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w", padx=20, pady=16)
+        ctk.CTkLabel(card, textvariable=self.distribution_account_var).pack(anchor="w", padx=20, pady=4)
+        self.distribution_tabs = ctk.CTkTabview(card, height=95, command=self._on_distribution_group_change)
+        self.distribution_tabs.pack(fill="x", padx=20, pady=6)
+        for i in range(5):
+            tab = self.distribution_tabs.add(f"배포{i+1}")
+            label = ctk.CTkLabel(tab, text="저장 명단: 0곳")
+            label.pack(anchor="w", padx=10)
+            self.distribution_group_labels.append(label)
+        self.btn_distribution_lookup = ctk.CTkButton(card, text="명단 조회·체크·저장", command=self._lookup_distribution_members)
+        self.btn_distribution_lookup.pack(anchor="w", padx=20, pady=6)
+        ctk.CTkButton(card, text="저장 데이터 불러오기", command=self._load_distribution_popup).pack(anchor="w", padx=20, pady=4)
+        for label, variable in (("기준년월 (YYYYMM)", self.distribution_month_var),
+                                ("배포 부수", self.distribution_count_var),
+                                ("배포일자 (YYYYMMDD)", self.distribution_date_var)):
+            row = ctk.CTkFrame(card, fg_color="transparent")
+            row.pack(fill="x", padx=20, pady=6)
+            ctk.CTkLabel(row, text=label, width=190, anchor="w").pack(side="left")
+            entry = ctk.CTkEntry(row, textvariable=variable, width=180)
+            entry.pack(side="left")
+            if variable is self.distribution_count_var:
+                self.distribution_count_entry = entry
+            if variable is self.distribution_date_var:
+                self.distribution_date_entry = entry
+                ctk.CTkOptionMenu(row, variable=self.distribution_mode_var,
+                    values=["랜덤배포", "저장명단 배포"], width=155).pack(side="left", padx=12)
+        selection_row = ctk.CTkFrame(card, fg_color="transparent")
+        selection_row.pack(fill="x", padx=20, pady=8)
+        ctk.CTkLabel(selection_row, text="처리할 저장 명단 (다중선택)").grid(row=0, column=0, columnspan=5, sticky="w", pady=5)
+        for i in range(5):
+            selection_row.grid_columnconfigure(i, weight=1)
+            check = ctk.CTkCheckBox(selection_row, text=f"배포{i+1}", variable=self.distribution_selected_groups[i], width=115)
+            check.grid(row=1, column=i, sticky="w", padx=3)
+            label = ctk.CTkLabel(selection_row, text="미지정", font=ctk.CTkFont(size=11))
+            label.grid(row=2, column=i, sticky="w", padx=3)
+            self.distribution_group_checks.append(check)
+            self.distribution_group_date_labels.append(label)
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=20, pady=6)
+        ctk.CTkLabel(row, text="회원구분", width=190, anchor="w").pack(side="left")
+        ctk.CTkOptionMenu(row, variable=self.distribution_type_var, values=["정회원", "비회원", "전체"]).pack(side="left")
+        ctk.CTkLabel(card, text="랜덤배포: 조회된 전체 미배포 대상에서 입력 부수만큼 무작위 선택, 옆의 날짜 적용.\n저장명단 배포: 체크한 배포1~배포5의 미배포 명단 전체에 각 탭의 저장 날짜 적용 (부수 입력 무시).\n현재 NMIS의 지회·지부·담당자·지역 및 회원구분 조건은 유지합니다.", justify="left", wraplength=750).pack(anchor="w", padx=20, pady=12)
+        self.btn_distribution_prepare = ctk.CTkButton(card, text="① 선택·배포일자 입력", command=lambda: self._run_distribution(False))
+        self.btn_distribution_prepare.pack(anchor="w", padx=20, pady=8)
+        self.btn_distribution_save = ctk.CTkButton(card, text="② 입력한 배포내역 등록", state="disabled", command=lambda: self._run_distribution(True))
+        self.btn_distribution_save.pack(anchor="w", padx=20, pady=8)
+        ctk.CTkLabel(card, textvariable=self.distribution_status_var, wraplength=650, justify="left").pack(anchor="w", padx=20, pady=16)
+
+        for variable in (self.distribution_mode_var, self.distribution_count_var, self.distribution_date_var,
+                         self.distribution_month_var, self.distribution_type_var, *self.distribution_selected_groups):
+            variable.trace_add("write", lambda *args: self._update_distribution_mode())
+        self._refresh_distribution_profile()
+        self._update_distribution_mode()
+
+    def _update_distribution_mode(self):
+        if not hasattr(self, "btn_distribution_save"):
+            return
+        random_mode = self.distribution_mode_var.get() == "랜덤배포"
+        for entry in (self.distribution_count_entry, self.distribution_date_entry):
+            entry.configure(state="normal" if random_mode else "disabled")
+        for check in self.distribution_group_checks:
+            check.configure(state="disabled" if random_mode else "normal")
+        self._on_distribution_group_change(load_date=False)
+
+    def _distribution_request(self):
+        active = PROFILE_STORE.active if PROFILE_STORE else None
+        if not active:
+            raise ValueError("Chrome 연결 열기에서 사용할 계정을 선택하세요.")
+        member_type = self.distribution_type_var.get()
+        month = self.distribution_month_var.get()
+        mode = self.distribution_mode_var.get()
+        if mode == "랜덤배포":
+            count, raw_date, raw_month = validate_request(member_type, self.distribution_count_var.get(), self.distribution_date_var.get(), month)
+            config = dict(account_id=active["id"], mode=mode, member_type=member_type, count=count, raw_date=raw_date, raw_month=raw_month)
+            return dict(config=config)
+        selected = [i for i, value in enumerate(self.distribution_selected_groups) if value.get()]
+        groups, dates = PROFILE_STORE.groups(active["id"]), PROFILE_STORE.group_dates(active["id"])
+        plan = saved_groups_plan(groups, dates, selected, member_type, month)
+        config = dict(account_id=active["id"], mode=mode, member_type=member_type, selected=selected,
+                      raw_month=plan["raw_month"], dates_by_id=plan["dates_by_id"])
+        return dict(config=config, groups=groups, dates=dates)
+
+    def _run_distribution(self, save):
+        if self.distribution_busy:
+            return
+        if not cdp_is_ready():
+            messagebox.showwarning("Chrome 미연결", "먼저 Chrome 연결 열기를 누르세요.")
+            return
+        active = PROFILE_STORE.active if PROFILE_STORE else None
+        if not active:
+            messagebox.showwarning("연결 계정 없음", "사용할 계정을 체크한 뒤 Chrome 연결 열기에서 로그인하세요.")
+            return
+        prepared = self.distribution_prepared
+        try:
+            request = self._distribution_request()
+            config = request["config"]
+            if save and (not prepared or prepared.get("request") != config):
+                raise ValueError("처리 방식·체크 명단·날짜 또는 조회 조건이 바뀌었습니다. ① 선택·배포일자 입력을 다시 실행하세요.")
+        except ValueError as exc:
+            messagebox.showerror("배포 입력 오류", str(exc))
+            return
+        self.distribution_busy = True
+        self.btn_distribution_lookup.configure(state="disabled")
+        self.btn_distribution_prepare.configure(state="disabled")
+        self.btn_distribution_save.configure(state="disabled")
+        self.distribution_status_var.set("배포내역 등록 중..." if save else "대상 조회 및 선택 중...")
+
+        def worker():
+            result = None
+            error = None
+            try:
+                with sync_playwright() as pw:
+                    browser = pw.chromium.connect_over_cdp(CDP_URL)
+                    page = find_nmis_page(browser)
+                    if save:
+                        save_distribution(page, prepared, self.log)
+                    else:
+                        if config["mode"] == "랜덤배포":
+                            result = prepare_distribution(page, config["member_type"], config["count"], config["raw_date"], config["raw_month"], self.log)
+                            result["summary"] = f"랜덤배포: {len(result['ids'])}곳 / {config['raw_date']}"
+                        else:
+                            result = prepare_saved_distribution(page, config["member_type"], request["groups"], request["dates"], config["selected"], config["raw_month"], self.log)
+                        result["request"] = config
+            except Exception as exc:
+                error = str(exc)
+                self.log(f"❌ 배포 처리 오류: {error}")
+
+            def finish():
+                self.distribution_busy = False
+                self.distribution_prepared = result
+                self.btn_distribution_lookup.configure(state="normal")
+                self.btn_distribution_prepare.configure(state="normal")
+                self.btn_distribution_save.configure(state="normal" if result else "disabled")
+                self._on_distribution_group_change(load_date=False)
+                if error:
+                    self.distribution_status_var.set(f"처리 중단: {error}")
+                    messagebox.showerror("배포 처리 오류", error, parent=self)
+                elif save:
+                    self.distribution_status_var.set(f"등록 완료: {len(prepared['ids'])}부\n{prepared.get('summary', '')}")
+                else:
+                    self.distribution_status_var.set(f"입력 완료: {len(result['ids'])}부\n{result['summary']}\n사이트에서 선택 결과를 확인한 뒤 ② 등록을 누르세요.")
+            self.after(0, finish)
+
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
 
     def _build_monthly_tab(self, parent: ctk.CTkScrollableFrame) -> None:
         # Card 1: 기본 설정 및 엑셀 지정
@@ -945,56 +1155,92 @@ class ModernSlipUI(ctk.CTk):
             ok = cdp_is_ready()
             st = "🟢 Chrome 연결됨 (Port 9222)" if ok else "🔴 Chrome 미연결"
             self.after(0, lambda: self.browser_status_var.set(st))
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
+
+    def _choose_login_profile(self):
+        choices = PROFILE_STORE.login_choices if PROFILE_STORE else []
+        if not choices:
+            messagebox.showwarning("로그인 계정 없음", "계정 및 시스템 설정에서 사용할 계정을 저장하고 체크하세요.")
+            return None
+        if len(choices) == 1:
+            return choices[0]
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Chrome 로그인 계정 선택")
+        dlg.geometry("430x300")
+        dlg.grab_set()
+        current = PROFILE_STORE.active
+        initial = current["id"] if current and any(a["id"] == current["id"] for a in choices) else choices[0]["id"]
+        selected = tk.StringVar(value=initial)
+        result = []
+        ctk.CTkLabel(dlg, text="이번 Chrome 연결에 사용할 계정을 선택하세요.").pack(pady=18)
+        for record in choices:
+            ctk.CTkRadioButton(dlg, text=record["user_id"], variable=selected, value=record["id"]).pack(anchor="w", padx=35, pady=8)
+        def choose():
+            result.append(next(a for a in choices if a["id"] == selected.get()))
+            dlg.destroy()
+        ctk.CTkButton(dlg, text="선택한 계정으로 로그인", command=choose).pack(pady=18)
+        self.wait_window(dlg)
+        return result[0] if result else None
 
     def start_attachable_chrome(self) -> None:
+        global CONNECTION_BUSY
+        if getattr(self, "account_switch_busy", False) or self.distribution_busy or any(t.name == "nmis-automation" and t.is_alive() for t in threading.enumerate()):
+            messagebox.showwarning("작업 중", "현재 작업이 끝난 뒤 Chrome 계정을 선택하세요.")
+            return
+        record = self._choose_login_profile()
+        if not record:
+            return
+        user_id = record["user_id"]
+        password = PROFILE_STORE.unprotect(record["password"])
+        if not password:
+            messagebox.showerror("계정 비밀번호 오류", "저장된 비밀번호를 읽지 못했습니다. 계정 설정에서 다시 입력해 저장하세요.")
+            return
         already_connected = cdp_is_ready()
-        if already_connected:
-            self.browser_status_var.set("🟢 Chrome 연결됨 (Port 9222)")
-            self.log("연결된 Chrome의 NMIS 로그인 상태를 다시 확인합니다.")
-        else:
+        if not already_connected:
             chrome = find_chrome()
             if not chrome:
-                messagebox.showerror("Chrome 오류", "Chrome 실행 파일(chrome.exe)을 찾지 못했습니다.")
+                messagebox.showerror("Chrome 오류", "Chrome 실행 파일을 찾지 못했습니다.")
                 return
-
             profile = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "nmis-cdp-profile"
             try:
-                subprocess.Popen([
-                    str(chrome),
-                    "--remote-debugging-port=9222",
-                    f"--user-data-dir={profile}",
-                    "http://nmis.foodservice.or.kr/"
-                ], close_fds=True)
-                self.browser_status_var.set("🟡 Chrome 시작 중...")
-                self.log("🌐 연결용 Chrome 브라우저 오픈 실행 중... 자동 로그인을 진행합니다.")
-            except Exception as e:
-                self.log(f"❌ Chrome 실행 실패: {e}")
-                messagebox.showerror("Chrome 오류", f"Chrome 실행 실패: {e}")
+                subprocess.Popen([str(chrome), "--remote-debugging-port=9222",
+                    f"--user-data-dir={profile}", "http://nmis.foodservice.or.kr/"], close_fds=True)
+            except Exception as exc:
+                messagebox.showerror("Chrome 오류", str(exc))
                 return
+        self.account_switch_busy = True
+        CONNECTION_BUSY = True
+        self.browser_status_var.set(f"🟡 {user_id} 로그인 연결 중...")
 
-        def auto_login_worker():
-            import time
-            time.sleep(1 if already_connected else 3)  # 기존 연결은 짧게, 새 Chrome은 로딩 대기
-
+        def worker():
+            error = None
             try:
+                time.sleep(1 if already_connected else 3)
                 with sync_playwright() as pw:
                     browser = pw.chromium.connect_over_cdp(CDP_URL)
-                    page = find_nmis_page(browser)
-                    if not page:
-                        self.log("연결된 Chrome에서 NMIS 페이지를 찾지 못했습니다.")
-                        self.after(0, lambda: self.browser_status_var.set("🟢 Chrome 연결됨 (Port 9222)"))
-                        return
-
-                    ensure_nmis_logged_in(page, NMIS_USER_ID, NMIS_PASSWORD, self.log)
-
-                    self.log("🎉 Chrome 연결 및 NMIS 로그인 완결!")
-                    self.after(0, lambda: self.browser_status_var.set("🟢 Chrome 연결됨 (Port 9222)"))
-            except Exception as e:
-                self.log(f"ℹ️ Chrome 연결 상태: {e}")
-                self.after(0, lambda: self.browser_status_var.set("🟢 Chrome 연결됨 (Port 9222)"))
-
-        threading.Thread(target=auto_login_worker, daemon=True).start()
+                    page = _find_nmis_page(browser)
+                    require_session_account(page, user_id, password, self.log, switch=True)
+            except Exception as exc:
+                error = str(exc)
+            def finish():
+                global CONNECTION_BUSY
+                try:
+                    if error:
+                        self.browser_status_var.set("🟡 계정 연결 확인 필요")
+                        self.log(f"Chrome 계정 연결 오류: {error}")
+                        messagebox.showerror("계정 연결 오류", error, parent=self)
+                    else:
+                        PROFILE_STORE.activate(record["id"])
+                        apply_active_profile()
+                        save_settings()
+                        self._refresh_distribution_profile()
+                        self.browser_status_var.set(f"🟢 {user_id} 연결됨")
+                        self.log(f"Chrome 계정 연결 완료: {user_id} — 모든 자동화와 배포 명단에 적용합니다.")
+                finally:
+                    self.account_switch_busy = False
+                    CONNECTION_BUSY = False
+            self.after(0, finish)
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
 
     def browse_file(self) -> None:
         p = filedialog.askopenfilename(
@@ -1476,19 +1722,31 @@ class ModernSlipUI(ctk.CTk):
                     ),
                 )
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
 
     # ── 월보고 실행 핸들러들 ─────────────────────────────────────────────────
 
     def start_run_monthly_fill(self) -> None:
         """1~4단계 연속 자동 작성"""
+        current = Path(self.monthly_excel_var.get()).expanduser()
+        selected = filedialog.askopenfilename(
+            parent=self,
+            title="월보고 4단계 작성 대상 엑셀 선택",
+            initialdir=str(current.parent) if current.is_file() else str(Path.home() / "Desktop"),
+            initialfile=current.name if current.is_file() else "",
+            filetypes=(("Excel 파일", "*.xls *.xlsx"), ("모든 파일", "*.*")),
+        )
+        if not selected:
+            return
+        excel_path = Path(selected).expanduser().resolve()
+        if not excel_path.is_file():
+            messagebox.showerror("파일 오류", "선택한 엑셀 파일을 찾을 수 없습니다.")
+            return
+        self.monthly_excel_var.set(str(excel_path))
         if not cdp_is_ready():
             messagebox.showwarning("Chrome 미연결", "먼저 [Chrome 연결 열기] 버튼을 누르세요.")
             return
-        excel_path = Path(self.monthly_excel_var.get()).expanduser()
-        if not excel_path.is_file():
-            messagebox.showerror("파일 오류", "월보고 엑셀 파일 경로를 확인해주세요.")
-            return
+        self.log(f"월보고 4단계 작성 대상: {excel_path}")
 
         target_ym = self.member_ym_var.get().strip()
 
@@ -1511,7 +1769,7 @@ class ModernSlipUI(ctk.CTk):
                 self.log(f"❌ 월보고 자동 입력 오류: {e}")
                 self.after(0, lambda: messagebox.showerror("오류", f"월보고 작성 중 오류: {e}"))
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
 
     def start_run_step1_only(self) -> None:
         if not cdp_is_ready():
@@ -1523,7 +1781,7 @@ class ModernSlipUI(ctk.CTk):
             with sync_playwright() as pw:
                 page = find_nmis_page(pw.chromium.connect_over_cdp(CDP_URL))
                 fill_monthly_report_from_nmis(page, excel_path=excel_path, target_year_month=target_ym, log_cb=self.log)
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
 
     def start_extract_settlement(self) -> None:
         if not cdp_is_ready():
@@ -1534,7 +1792,7 @@ class ModernSlipUI(ctk.CTk):
             with sync_playwright() as pw:
                 page = find_nmis_page(pw.chromium.connect_over_cdp(CDP_URL))
                 fetch_sheet4_data_only(page, target_year_month=target_ym, log_cb=self.log)
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
 
     def start_run_member_fill(self) -> None:
         if not cdp_is_ready():
@@ -1546,7 +1804,7 @@ class ModernSlipUI(ctk.CTk):
             with sync_playwright() as pw:
                 page = find_nmis_page(pw.chromium.connect_over_cdp(CDP_URL))
                 fill_member_status_from_nmis(page, excel_path=excel_path, target_year_month=target_ym, log_cb=self.log)
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
 
     def start_run_sheet4_fill(self) -> None:
         if not cdp_is_ready():
@@ -1558,7 +1816,7 @@ class ModernSlipUI(ctk.CTk):
             with sync_playwright() as pw:
                 page = find_nmis_page(pw.chromium.connect_over_cdp(CDP_URL))
                 fill_monthly_member_and_revenue_report(page, excel_path=excel_path, target_year_month=target_ym, log_cb=self.log)
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
 
     def start_preview_sheet4(self) -> None:
         if not cdp_is_ready():
@@ -1569,7 +1827,7 @@ class ModernSlipUI(ctk.CTk):
             with sync_playwright() as pw:
                 page = find_nmis_page(pw.chromium.connect_over_cdp(CDP_URL))
                 fetch_sheet4_data_only(page, target_year_month=target_ym, log_cb=self.log)
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
 
     def start_run_staff_fill(self) -> None:
         if not cdp_is_ready():
@@ -1582,7 +1840,7 @@ class ModernSlipUI(ctk.CTk):
                 page = find_nmis_page(pw.chromium.connect_over_cdp(CDP_URL))
                 data = fetch_sheet4_data_only(page, target_year_month=target_ym, log_cb=self.log)
                 fill_staff_join_excel_from_data(excel_path=excel_path, data=data, log_cb=self.log)
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
 
     def start_register_ship_documents(self, only_first_doc: bool = False) -> None:
         if not cdp_is_ready():
@@ -1594,7 +1852,7 @@ class ModernSlipUI(ctk.CTk):
             with sync_playwright() as pw:
                 page = find_nmis_page(pw.chromium.connect_over_cdp(CDP_URL))
                 register_ship_documents_on_nmis(page, send_date=send_date, report_month_label=month_label, only_first_doc=only_first_doc, log_cb=self.log)
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
 
     # ── PDF DATE 일자수정 ───────────────────────────────────────────────────
 
@@ -1850,7 +2108,7 @@ class ModernSlipUI(ctk.CTk):
 
             self.after(0, finish)
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
 
     def _refresh_pdf_date_tree(self) -> None:
         self.pdf_date_tree.delete(*self.pdf_date_tree.get_children())
@@ -1973,7 +2231,7 @@ class ModernSlipUI(ctk.CTk):
 
             self.after(0, finish)
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
 
     # ── 접수대장 자동화 ─────────────────────────────────────────────────────
 
@@ -2341,7 +2599,7 @@ class ModernSlipUI(ctk.CTk):
                 self.receipt_running = False
                 self.after(0, lambda: self.receipt_search_button.configure(state="normal"))
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
 
     def start_receipt_registration(self) -> None:
         if self.receipt_running:
@@ -2444,7 +2702,7 @@ class ModernSlipUI(ctk.CTk):
                     self._show_receipt_batch_result(ok, error, total),
                 )
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
 
     # ── 회비 및 가입금관리 월회비 입금 자동화 ──────────────────────────────
 
@@ -2827,39 +3085,374 @@ class ModernSlipUI(ctk.CTk):
                     self._show_fee_batch_result(ok, no_row, errors, total, was_stopped, remaining, start_error),
                 )
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
+
+    def _on_distribution_group_change(self, *, load_date=True):
+        if not hasattr(self, "btn_distribution_save"):
+            return
+        prepared = self.distribution_prepared
+        enabled = False
+        if prepared and not self.distribution_busy:
+            try:
+                enabled = prepared.get("request") == self._distribution_request()["config"]
+            except ValueError:
+                pass
+        self.btn_distribution_save.configure(state="normal" if enabled else "disabled")
+
+    def _lookup_distribution_members(self):
+        if self.distribution_busy or getattr(self, "account_switch_busy", False):
+            return
+        active = PROFILE_STORE.active if PROFILE_STORE else None
+        if not active:
+            messagebox.showwarning("연결 계정 없음", "사용할 계정을 체크한 뒤 Chrome 연결 열기에서 로그인하세요.")
+            return
+        group_index = int(self.distribution_tabs.get().replace("배포", "")) - 1
+        month, member_type = self.distribution_month_var.get(), self.distribution_type_var.get()
+        try:
+            validate_request(member_type, 1, datetime.datetime.now().strftime("%Y%m%d"), month)
+        except ValueError as exc:
+            messagebox.showerror("조회 조건 오류", str(exc))
+            return
+        self.distribution_busy = True
+        self.distribution_prepared = None
+        self.btn_distribution_save.configure(state="disabled")
+        self.btn_distribution_lookup.configure(state="disabled")
+        self.btn_distribution_prepare.configure(state="disabled")
+        self.distribution_status_var.set("NMIS 배포 명단 조회 중...")
+
+        def worker():
+            rows, error = None, None
+            try:
+                with sync_playwright() as pw:
+                    browser = pw.chromium.connect_over_cdp(CDP_URL)
+                    page = find_nmis_page(browser)
+                    rows = lookup_distribution(page, member_type, month)["rows"]
+            except Exception as exc:
+                error = str(exc)
+
+            def finish():
+                self.distribution_busy = False
+                self.btn_distribution_lookup.configure(state="normal")
+                self.btn_distribution_prepare.configure(state="normal")
+                if error:
+                    self.distribution_status_var.set(f"조회 실패: {error}")
+                    messagebox.showerror("명단 조회 오류", error, parent=self)
+                elif PROFILE_STORE.active and PROFILE_STORE.active["id"] == active["id"]:
+                    self.distribution_status_var.set(f"조회 완료: {len(rows)}곳")
+                    self._edit_distribution_group(active, group_index, rows)
+            self.after(0, finish)
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
+
+    def _load_distribution_popup(self):
+        if self.distribution_busy or getattr(self, "account_switch_busy", False):
+            return
+        account = PROFILE_STORE.active if PROFILE_STORE else None
+        if not account:
+            messagebox.showwarning("연결 계정 없음", "Chrome 연결 열기에서 사용할 계정을 선택하세요.")
+            return
+        try:
+            PROFILE_STORE.reload_distribution_data(account["id"])
+            index = int(self.distribution_tabs.get().replace("배포", "")) - 1
+            self._edit_distribution_group(account, index, None)
+        except Exception as exc:
+            messagebox.showerror("데이터 불러오기 오류", str(exc), parent=self)
+
+    def _edit_distribution_group(self, account, index, rows):
+        groups = PROFILE_STORE.groups(account["id"])
+        saved_dates = PROFILE_STORE.group_dates(account["id"])
+        queried = rows is not None
+        base_records = {str(r["memberId"]): {
+            "memberName": str(r.get("memberName") or ""),
+            "ceoMemberName": str(r.get("ceoMemberName") or ""),
+            "memberTypeName": str(r.get("memberTypeName") or ""),
+        } for r in (rows or []) if r.get("memberId") is not None}
+        known_records = dict(base_records)
+        for group in groups:
+            for key, value in group.items():
+                known_records.setdefault(key, value)
+        dlg = ctk.CTkToplevel(self)
+        dlg.title(f"{account['user_id']} — 배포 명단·날짜 관리")
+        dlg.geometry("920x760")
+        dlg.grab_set()
+        ctk.CTkLabel(dlg, text="업소를 체크한 뒤 ‘저장할 배포 탭’을 선택하고 데이터 저장을 누르세요.\n체크한 업소는 선택한 탭으로 이동하며, 그 탭의 기존 명단은 함께 유지됩니다.").pack(pady=10)
+        query = tk.StringVar()
+        summary = tk.StringVar()
+        status = tk.StringVar(value="저장 명단을 불러왔습니다." if not queried else "조회한 목록에서 체크하세요.")
+        dates = [tk.StringVar(value=value or datetime.datetime.now().strftime("%Y%m%d")) for value in saved_dates]
+        tabs = ctk.CTkTabview(dlg, height=100, command=lambda: view_changed())
+        tabs.pack(fill="x", padx=18, pady=4)
+        counts = []
+        for i in range(5):
+            tab = tabs.add(f"배포{i+1}")
+            ctk.CTkLabel(tab, text="배포일자 (YYYYMMDD):").pack(side="left", padx=8)
+            ctk.CTkEntry(tab, textvariable=dates[i], width=140).pack(side="left", padx=8)
+            label = ctk.CTkLabel(tab, text="")
+            label.pack(side="left", padx=12)
+            counts.append(label)
+        tabs.set(f"배포{index+1}")
+        ctk.CTkEntry(dlg, textvariable=query, placeholder_text="상호·대표자·회원구분 검색").pack(fill="x", padx=18, pady=6)
+        ctk.CTkLabel(dlg, textvariable=summary).pack(anchor="w", padx=18)
+        destination = tk.StringVar(value=f"배포{index+1}")
+        destination_row = ctk.CTkFrame(dlg, fg_color="transparent")
+        destination_row.pack(fill="x", padx=18, pady=8)
+        ctk.CTkLabel(destination_row, text="저장할 배포 탭:").pack(side="left", padx=5)
+        ctk.CTkOptionMenu(destination_row, variable=destination,
+                          values=[f"배포{i}" for i in range(1, 6)],
+                          command=lambda value: destination_date.configure(textvariable=dates[int(value.replace("배포", ""))-1])).pack(side="left", padx=8)
+        ctk.CTkLabel(destination_row, text="배포일자:").pack(side="left", padx=5)
+        destination_date = ctk.CTkEntry(destination_row, textvariable=dates[index], width=145)
+        destination_date.pack(side="left", padx=8)
+        table = ttk.Frame(dlg)
+        table.pack(fill="both", expand=True, padx=18, pady=8)
+        tree = ttk.Treeview(table, columns=("check", "name", "owner", "type", "note"), show="headings", selectmode="extended")
+        for key, title, width in (("check", "선택", 55), ("name", "상호", 240), ("owner", "대표자", 110), ("type", "회원구분", 100), ("note", "조회 상태", 180)):
+            tree.heading(key, text=title)
+            tree.column(key, width=width, anchor="w")
+        scroll = ttk.Scrollbar(table, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        visible = []
+        records = {}
+
+        def current_index():
+            return int(tabs.get().replace("배포", "")) - 1
+
+        def view_changed():
+            destination.set(tabs.get())
+            destination_date.configure(textvariable=dates[current_index()])
+            refresh()
+
+        def refresh(*args):
+            current = current_index()
+            catalog = dict(known_records)
+            for group in groups:
+                for key, value in group.items():
+                    catalog.setdefault(key, value)
+            claimed = {key for i, group in enumerate(groups) if i != current for key in group}
+            records.clear()
+            records.update({key: value for key, value in catalog.items() if key not in claimed})
+            needle = query.get().strip().casefold()
+            visible[:] = [key for key, record in records.items() if needle in " ".join(record.values()).casefold()]
+            tree.delete(*tree.get_children())
+            for key in visible:
+                record = records[key]
+                note = "조회됨" if key in base_records else ("이번 조회 없음 (저장 명단)" if queried else "저장 명단")
+                tree.insert("", "end", iid=key, values=("☑" if key in groups[current] else "☐", record.get("memberName", ""), record.get("ceoMemberName", ""), record.get("memberTypeName", ""), note))
+            for i, label in enumerate(counts):
+                label.configure(text=f"선택 {len(groups[i])}곳")
+            summary.set(f"배포{current+1}: 선택 {len(groups[current])}곳 / 검색 결과 {len(visible)}곳 / 다른 탭 제외 {len(claimed)}곳")
+
+        def toggle(keys):
+            current = current_index()
+            for key in keys:
+                if key in groups[current]:
+                    del groups[current][key]
+                else:
+                    groups[current][key] = dict(records[key])
+            status.set("변경 내용은 데이터 저장을 눌러야 보관됩니다.")
+            refresh()
+
+        tree.bind("<Button-1>", lambda event: toggle([tree.identify_row(event.y)]) if tree.identify_region(event.x, event.y) == "cell" and tree.identify_row(event.y) else None)
+        tree.bind("<space>", lambda event: (toggle(tree.selection()), "break")[-1])
+        query.trace_add("write", refresh)
+        ctk.CTkLabel(dlg, textvariable=status, wraplength=850).pack(anchor="w", padx=18)
+        buttons = ctk.CTkFrame(dlg, fg_color="transparent")
+        buttons.pack(fill="x", padx=18, pady=12)
+
+        def select_visible(value):
+            group = groups[current_index()]
+            for key in visible:
+                if value:
+                    group[key] = dict(records[key])
+                else:
+                    group.pop(key, None)
+            status.set("변경 내용은 데이터 저장을 눌러야 보관됩니다.")
+            refresh()
+
+        def check_account():
+            if not PROFILE_STORE.active or PROFILE_STORE.active["id"] != account["id"]:
+                raise ValueError("연결 계정이 변경되었습니다. 다시 불러오세요.")
+
+        def save():
+            try:
+                check_account()
+                source = current_index()
+                target = int(destination.get().replace("배포", "")) - 1
+                selected_members = dict(groups[source])
+                if source != target and not selected_members:
+                    raise ValueError("저장할 업소를 먼저 체크하세요.")
+                updated = assign_distribution_members(groups, target, selected_members)
+                PROFILE_STORE.save_distribution_data(account["id"], updated, [value.get() for value in dates])
+                groups[:] = updated
+                tabs.set(f"배포{target+1}")
+                refresh()
+                self.distribution_tabs.set(tabs.get())
+                self._refresh_distribution_profile()
+                status.set(f"체크 명단 {len(selected_members)}곳 → 배포{target+1} 저장 완료 / 해당 탭 총 {len(groups[target])}곳")
+                self.distribution_status_var.set("배포1~배포5 명단·날짜 데이터 저장 완료")
+            except Exception as exc:
+                messagebox.showerror("데이터 저장 오류", str(exc), parent=dlg)
+
+        def load():
+            try:
+                check_account()
+                restored, restored_dates = PROFILE_STORE.reload_distribution_data(account["id"])
+                groups[:] = restored
+                for group in restored:
+                    for key, value in group.items():
+                        known_records.setdefault(key, value)
+                for variable, value in zip(dates, restored_dates):
+                    variable.set(value or datetime.datetime.now().strftime("%Y%m%d"))
+                view_changed()
+                self.distribution_tabs.set(tabs.get())
+                self._refresh_distribution_profile()
+                status.set("저장 데이터 불러오기 완료 — 이번 달 배포일자를 확인·변경하세요.")
+            except Exception as exc:
+                messagebox.showerror("데이터 불러오기 오류", str(exc), parent=dlg)
+        ctk.CTkButton(buttons, text="검색결과 전체 선택", width=145, command=lambda: select_visible(True)).pack(side="left", padx=3)
+        ctk.CTkButton(buttons, text="검색결과 선택 해제", width=145, command=lambda: select_visible(False)).pack(side="left", padx=3)
+        ctk.CTkButton(buttons, text="데이터 저장", width=130, command=save).pack(side="right", padx=3)
+        ctk.CTkButton(buttons, text="데이터 불러오기", width=130, command=load).pack(side="right", padx=3)
+        ctk.CTkButton(buttons, text="닫기", width=70, command=dlg.destroy).pack(side="right", padx=3)
+        refresh()
+
+    def _refresh_distribution_profile(self):
+        self.distribution_prepared = None
+        self.btn_distribution_save.configure(state="disabled")
+        active = PROFILE_STORE.active if PROFILE_STORE else None
+        self.distribution_account_var.set(f"현재 연결 계정: {active['user_id']}" if active else "연결 계정 없음 — Chrome 연결 열기에서 계정을 선택하세요.")
+        groups = PROFILE_STORE.groups(active["id"]) if active else [{} for _ in range(5)]
+        dates = PROFILE_STORE.group_dates(active["id"]) if active else [""] * 5
+        for i, label in enumerate(self.distribution_group_labels):
+            label.configure(text=f"저장 명단: {len(groups[i])}곳 / 배포일자: {dates[i] or '미지정'}")
+            self.distribution_group_checks[i].configure(text=f"배포{i+1} ({len(groups[i])}곳)")
+            self.distribution_group_date_labels[i].configure(text=dates[i] or "날짜 미지정")
+        self._on_distribution_group_change()
+
+    def check_app_update(self):
+        if getattr(self, "update_check_busy", False):
+            return
+        self.update_check_busy = True
+        self.btn_app_update.configure(state="disabled", text="업데이트 확인 중...")
+        def worker():
+            release, error = None, None
+            try:
+                from app_updater import check_latest
+                release = check_latest(APP_VERSION if getattr(sys, "frozen", False) else "0.0.0")
+            except Exception as exc:
+                error = str(exc)
+            def finish():
+                self.update_check_busy = False
+                self.btn_app_update.configure(state="normal", text="⬆ 업데이트 확인")
+                if error:
+                    messagebox.showerror("업데이트 확인 오류", error, parent=self)
+                elif not release:
+                    messagebox.showinfo("업데이트", f"최신 버전을 사용 중입니다. ({APP_VERSION})", parent=self)
+                else:
+                    self._show_app_update(release)
+            self.after(0, finish)
+        threading.Thread(target=worker, daemon=True, name="nmis-updater-check").start()
+
+    def _show_app_update(self, release):
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("프로그램 업데이트")
+        dlg.geometry("650x450")
+        dlg.grab_set()
+        ctk.CTkLabel(dlg, text=f"현재 {APP_VERSION} → 새 버전 {release['version']}", font=ctk.CTkFont(size=17, weight="bold")).pack(pady=16)
+        notes = ctk.CTkTextbox(dlg, height=190)
+        notes.pack(fill="both", expand=True, padx=18, pady=6)
+        notes.insert("1.0", release["notes"] or "새 버전을 사용할 수 있습니다.")
+        notes.configure(state="disabled")
+        status = tk.StringVar(value="계정 설정·배포 명단·날짜·접수 이력은 유지됩니다.")
+        ctk.CTkLabel(dlg, textvariable=status, wraplength=600).pack(padx=18, pady=8)
+        busy = [False]
+        dlg.protocol("WM_DELETE_WINDOW", lambda: None if busy[0] else dlg.destroy())
+
+        def install():
+            if busy[0]:
+                return
+            if any(t.name == "nmis-automation" and t.is_alive() for t in threading.enumerate()):
+                messagebox.showwarning("작업 중", "자동화 작업이 끝난 뒤 업데이트하세요.", parent=dlg)
+                return
+            if not messagebox.askyesno("업데이트 설치", "다운로드와 검증이 끝나면 프로그램을 종료하고 새 버전으로 다시 실행합니다. 진행할까요?", parent=dlg):
+                return
+            busy[0] = True
+            button.configure(state="disabled")
+            status.set("새 버전을 다운로드합니다...")
+            def worker():
+                stage, payload, error = None, None, None
+                try:
+                    from app_updater import stage_update
+                    stage, payload = stage_update(release, lambda text: self.after(0, lambda value=text: status.set(value)))
+                except Exception as exc:
+                    error = str(exc)
+                def finish():
+                    if not error:
+                        try:
+                            from app_updater import launch_update_helper
+                            launch_update_helper(stage, payload, APP_ROOT)
+                            self.destroy()
+                            return
+                        except Exception as exc:
+                            messagebox.showerror("업데이트 시작 오류", str(exc), parent=dlg)
+                    else:
+                        messagebox.showerror("업데이트 오류", error, parent=dlg)
+                    busy[0] = False
+                    button.configure(state="normal")
+                    status.set("업데이트하지 못했습니다. 현재 버전을 계속 사용할 수 있습니다.")
+                self.after(0, finish)
+            threading.Thread(target=worker, daemon=True, name="nmis-updater-download").start()
+        button = ctk.CTkButton(dlg, text="다운로드 후 업데이트", command=install)
+        button.pack(pady=(0, 16))
 
     def open_settings(self) -> None:
+        if PROFILE_STORE is None:
+            messagebox.showerror("계정 설정 오류", "계정 파일을 읽지 못했습니다. 프로그램 로그를 확인하세요.")
+            return
         dlg = ctk.CTkToplevel(self)
         dlg.title("계정 및 시스템 설정")
-        dlg.geometry("450x380")
+        dlg.geometry("680x600")
         dlg.grab_set()
+        ctk.CTkLabel(dlg, text="Chrome 로그인 계정 (최대 3개)", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=16)
+        ctk.CTkLabel(dlg, text="체크한 계정만 Chrome 연결 후보가 됩니다.\n2개 이상 체크하면 Chrome 연결 열기에서 로그인 계정을 선택합니다.\n비밀번호를 비워 저장하면 기존 값을 유지합니다.").pack(pady=4)
+        accounts = PROFILE_STORE.accounts
+        checked_ids = {a["id"] for a in PROFILE_STORE.login_choices}
+        editors = []
+        for index in range(3):
+            card = ctk.CTkFrame(dlg)
+            card.pack(fill="x", padx=20, pady=8)
+            ctk.CTkLabel(card, text=f"계정 {index+1}").grid(row=0, column=0, padx=10, pady=8)
+            checked = tk.BooleanVar(value=accounts[index]["id"] in checked_ids if index < len(accounts) else False)
+            ctk.CTkCheckBox(card, text="Chrome 로그인에 사용", variable=checked, command=lambda i=index: save_row(i)).grid(row=0, column=1, columnspan=2, padx=10, pady=8)
+            uid = ctk.CTkEntry(card, placeholder_text="아이디", width=180)
+            uid.grid(row=1, column=0, padx=10, pady=8)
+            pwd = ctk.CTkEntry(card, placeholder_text="비밀번호 (변경 시 입력)", show="●", width=220)
+            pwd.grid(row=1, column=1, columnspan=2, padx=10, pady=8)
+            if index < len(accounts):
+                uid.insert(0, accounts[index]["user_id"])
+            editors.append((uid, pwd, checked))
+            ctk.CTkButton(card, text="계정 저장", width=110, command=lambda i=index: save_row(i)).grid(row=2, column=0, padx=10, pady=8)
 
-        ctk.CTkLabel(dlg, text="🔑 통합 로그인 계정 설정", font=ctk.CTkFont(family="맑은 고딕", size=14, weight="bold"), text_color="#A855F7").pack(pady=16)
-
-        f_id = ctk.CTkFrame(dlg, fg_color="transparent")
-        f_id.pack(fill="x", padx=30, pady=8)
-        ctk.CTkLabel(f_id, text="아이디 (ID):", font=ctk.CTkFont(family="맑은 고딕", size=12)).pack(side="left", padx=(0, 10))
-        e_id = ctk.CTkEntry(f_id, width=200)
-        e_id.pack(side="left")
-        e_id.insert(0, NMIS_USER_ID)
-
-        f_pw = ctk.CTkFrame(dlg, fg_color="transparent")
-        f_pw.pack(fill="x", padx=30, pady=8)
-        ctk.CTkLabel(f_pw, text="비밀번호 (PW):", font=ctk.CTkFont(family="맑은 고딕", size=12)).pack(side="left", padx=(0, 10))
-        e_pw = ctk.CTkEntry(f_pw, width=200, show="●")
-        e_pw.pack(side="left")
-        e_pw.insert(0, NMIS_PASSWORD)
-
-        def save_and_close():
-            global NMIS_USER_ID, NMIS_PASSWORD
-            NMIS_USER_ID = e_id.get().strip()
-            NMIS_PASSWORD = e_pw.get().strip()
-            save_settings()
-            messagebox.showinfo("저장 완료", "계정 설정이 성공적으로 저장되었습니다.")
-            dlg.destroy()
-
-        ctk.CTkButton(dlg, text="저장하기", fg_color="#10B981", hover_color="#059669", command=save_and_close).pack(pady=24)
+        def save_row(index):
+            uid, pwd, checked = editors[index]
+            if self.distribution_busy or getattr(self, "account_switch_busy", False) or any(t.name == "nmis-automation" and t.is_alive() for t in threading.enumerate()):
+                records = PROFILE_STORE.accounts
+                checked.set(index < len(records) and records[index]["id"] in {a["id"] for a in PROFILE_STORE.login_choices})
+                messagebox.showwarning("작업 중", "진행 중인 작업이 끝난 뒤 계정을 수정하세요.", parent=dlg)
+                return
+            try:
+                record = PROFILE_STORE.save_account(index, uid.get(), pwd.get())
+                PROFILE_STORE.set_checked(record["id"], checked.get())
+                pwd.delete(0, "end")
+                apply_active_profile()
+                save_settings()
+                self._refresh_distribution_profile()
+            except Exception as exc:
+                records = PROFILE_STORE.accounts
+                checked.set(index < len(records) and records[index]["id"] in {a["id"] for a in PROFILE_STORE.login_choices})
+                messagebox.showerror("계정 저장 오류", str(exc), parent=dlg)
+        ctk.CTkButton(dlg, text="닫기", command=dlg.destroy).pack(pady=12)
 
     # ── [탭 3] 회원 정보 검수 뷰 ──────────────────────────────────────────
 
@@ -3133,6 +3726,7 @@ class ModernSlipUI(ctk.CTk):
             try:
                 with sync_playwright() as pw:
                     browser = pw.chromium.connect_over_cdp(CDP_URL)
+                    find_nmis_page(browser)
                     res = verify_member_info_from_nmis(
                         target=browser,
                         excel_path=excel_p,
@@ -3168,7 +3762,7 @@ class ModernSlipUI(ctk.CTk):
                     self.lbl_member_status.configure(text=f"❌ 오류 발생: {err_msg[:40]}", text_color="#EF4444")
                 self.after(0, on_error)
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
 
     def _center_dialog(self, dlg: ctk.CTkToplevel, width: int = 520, height: int = 460) -> None:
         try:
@@ -3962,6 +4556,7 @@ class ModernSlipUI(ctk.CTk):
             try:
                 with sync_playwright() as pw:
                     browser = pw.chromium.connect_over_cdp(CDP_URL)
+                    find_nmis_page(browser)
                     res = register_potential_members_on_nmis(
                         target=browser,
                         selected_rows=selected_rows,
@@ -3993,7 +4588,7 @@ class ModernSlipUI(ctk.CTk):
                     self.lbl_potential_status.configure(text=f"❌ 오류: {err_msg[:40]}", text_color="#EF4444")
                 self.after(0, on_error)
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True, name="nmis-automation").start()
 
     def stop_potential_registration(self) -> None:
         if hasattr(self, "is_potential_running") and self.is_potential_running:

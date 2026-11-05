@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+from app_paths import APP_ROOT
 from typing import Callable, Iterable, Mapping
 
 import xlrd
@@ -755,7 +756,7 @@ def _fill_slip(
 
 def get_active_macro_steps() -> list[dict[str, str]]:
     try:
-        settings_path = Path(__file__).parent / "settings.json"
+        settings_path = APP_ROOT / "settings.json"
         if settings_path.is_file():
             d = json.loads(settings_path.read_text(encoding="utf-8"))
             if "macro_steps" in d and d["macro_steps"]:
@@ -1939,6 +1940,30 @@ def validate_monthly_report_data(data: Mapping[str, object]) -> None:
         )
 
 
+def navigate_to_settlement_statement(page: Page, log_cb=None) -> None:
+    """Open the exact settlement route and verify its visible search form."""
+    log = log_cb or (lambda message: None)
+    route = "account/close/reandex/book/list"
+    form = page.locator("input[name='slipYearMonth']:visible").first
+    log("NMIS 메뉴 이동: 회계 > 결산관리 > 세입세출표")
+    try:
+        go_to_angular_state(page, route)
+        form.wait_for(state="visible", timeout=15_000)
+        return
+    except Exception as exc:
+        log(f"세입세출표 직접 이동 실패, 메뉴로 다시 이동합니다: {exc}")
+
+    page.locator("a:visible, button:visible").filter(has_text=re.compile(r"^\s*회계\s*$")).first.click(timeout=10_000)
+    submenu = page.locator("#accountclosereandexbooklist")
+    if submenu.count():
+        submenu.first.click(timeout=10_000)
+    else:
+        page.locator("a:visible, button:visible").filter(has_text=re.compile(r"^\s*결산관리\s*$")).first.click(timeout=10_000)
+        page.locator("a:visible, button:visible").filter(has_text=re.compile(r"^\s*세입세출표\s*$")).first.click(timeout=10_000)
+    wait_for_angular_state(page, route)
+    form.wait_for(state="visible", timeout=15_000)
+
+
 def fill_monthly_report_from_nmis(
     page: Page,
     excel_path: Path | str,
@@ -1972,75 +1997,7 @@ def fill_monthly_report_from_nmis(
 
     write_log(f"📌 [1/5] [월보고 자동등록] 전표년월: {target_ym_dash} ({target_month_int}월) 조회 및 엑셀 작성 시작...")
 
-    # 1. '회계' 메뉴 클릭
-    write_log("  -> [회계] 상단 메뉴 클릭 중...")
-    page.evaluate("""
-        (function() {
-            var links = document.querySelectorAll('a, span, li, button');
-            for (var i = 0; i < links.length; i++) {
-                var txt = links[i].textContent.trim();
-                if (txt === '회계') {
-                    links[i].click();
-                    return true;
-                }
-            }
-            return false;
-        })()
-    """)
-    time.sleep(1.5)
-
-    # 2. '결산관리' 메뉴 클릭
-    write_log("  -> [결산관리] 메뉴 클릭 중...")
-    page.evaluate("""
-        (function() {
-            var elems = document.querySelectorAll('a, span, li, td, div, button');
-            for (var i = 0; i < elems.length; i++) {
-                var txt = elems[i].textContent.trim();
-                if (txt === '결산관리' || txt.indexOf('결산관리') !== -1) {
-                    elems[i].click();
-                    return true;
-                }
-            }
-            return false;
-        })()
-    """)
-    time.sleep(1.5)
-
-    # 3. '세입세출표' 메뉴 클릭 및 이동 검증
-    write_log("  -> [세입세출표] 메뉴 이동 중...")
-    page.evaluate("""
-        (function() {
-            var elems = document.querySelectorAll('a, span, li, td, div, button');
-            for (var i = 0; i < elems.length; i++) {
-                var txt = elems[i].textContent.trim();
-                if (txt === '세입세출표' || txt === '세입세출결산서' || (txt.indexOf('세입세출') !== -1 && txt.indexOf('표') !== -1)) {
-                    elems[i].click();
-                    return true;
-                }
-            }
-            return false;
-        })()
-    """)
-    time.sleep(2.0)
-
-    # 4. input[name='slipYearMonth'] 입력 요소 대기 및 전표년월 입력
-    try:
-        page.wait_for_selector("input[name='slipYearMonth']", timeout=6000)
-    except Exception:
-        write_log("  ⚠️ 세입세출표 폼 로딩 대기... 메뉴를 한번 더 클릭합니다.")
-        page.evaluate("""
-            (function() {
-                var elems = document.querySelectorAll('a, span, button');
-                for (var i = 0; i < elems.length; i++) {
-                    if (elems[i].textContent.trim() === '세입세출표') {
-                        elems[i].click();
-                        return true;
-                    }
-                }
-                return false;
-            })()
-        """)
-        time.sleep(2.0)
+    navigate_to_settlement_statement(page, write_log)
 
     write_log(f"📌 [2/5] 세입세출표 전표년월(slipYearMonth)에 '{target_ym_dash}' 세팅 및 조회 실행...")
     ym_loc = page.locator("input[name='slipYearMonth']:visible")
