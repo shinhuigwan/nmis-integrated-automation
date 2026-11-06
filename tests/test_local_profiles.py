@@ -112,6 +112,51 @@ class ProfilesTests(unittest.TestCase):
         require_session_account(page, "demo-account", "password", switch=True)
         page.locator.return_value.click.assert_not_called()
 
+    def test_slow_initial_login_form_is_ready_before_credentials_are_checked(self):
+        page = MagicMock()
+        page.url = "http://nmis.foodservice.or.kr/"
+        page.locator.return_value.count.return_value = 0
+        page.evaluate.return_value = "selected"
+
+        def ready(*args, **kwargs):
+            page.locator.return_value.count.return_value = 1
+
+        page.wait_for_function.side_effect = ready
+        with patch("membership_fee_register.ensure_nmis_logged_in") as login:
+            require_session_account(page, "selected", "password", switch=True)
+        login.assert_called_once()
+        self.assertEqual(page.wait_for_function.call_count, 2)
+        page.locator.return_value.click.assert_not_called()
+
+    def test_loading_timeout_does_not_login_or_logout(self):
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        page = MagicMock()
+        page.url = "http://nmis.foodservice.or.kr/"
+        page.wait_for_function.side_effect = PlaywrightTimeoutError("still loading")
+        with patch("membership_fee_register.ensure_nmis_logged_in") as login:
+            with self.assertRaisesRegex(RuntimeError, "30초"):
+                require_session_account(page, "selected", "password", switch=True)
+        login.assert_not_called()
+        page.locator.assert_not_called()
+
+    def test_other_site_is_rejected_before_waiting_or_using_credentials(self):
+        page = MagicMock()
+        page.url = "https://example.com/"
+        with patch("membership_fee_register.ensure_nmis_logged_in") as login:
+            with self.assertRaisesRegex(RuntimeError, "NMIS 주소"):
+                require_session_account(page, "selected", "password", switch=True)
+        page.wait_for_function.assert_not_called()
+        login.assert_not_called()
+
+    def test_navigation_away_during_loading_does_not_use_credentials(self):
+        page = MagicMock()
+        page.url = "http://nmis.foodservice.or.kr/"
+        page.wait_for_function.side_effect = lambda *args, **kwargs: setattr(page, "url", "https://example.com/")
+        with patch("membership_fee_register.ensure_nmis_logged_in") as login:
+            with self.assertRaisesRegex(RuntimeError, "NMIS 주소"):
+                require_session_account(page, "selected", "password", switch=True)
+        login.assert_not_called()
+
     def test_checked_candidates_are_distinct_from_connected_account(self):
         first = self.store.save_account(0, "first", "password")
         second = self.store.save_account(1, "second", "password")

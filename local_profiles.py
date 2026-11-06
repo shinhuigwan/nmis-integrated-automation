@@ -172,23 +172,66 @@ class ProfileStore:
         self.persist()
 
 
+_SESSION_IDENTITY = """() => {
+    const roots = [document.querySelector('[ng-app]'), document.body,
+                   document.documentElement, document].filter(Boolean);
+    if (!window.angular) return '';
+    for (const root of roots) {
+        try {
+            const element = angular.element(root);
+            const scope = element.scope();
+            if (scope?.userInfo?.userId) return String(scope.userInfo.userId);
+            const injector = element.injector();
+            const info = injector?.get('$rootScope')?.userInfo;
+            if (info?.userId) return String(info.userId);
+        } catch (_) {}
+    }
+    return '';
+}"""
+
+_SESSION_READY = """() => {
+    const visible = selector => {
+        const input = document.querySelector(selector);
+        return input && input.getClientRects().length > 0
+            && getComputedStyle(input).visibility !== 'hidden';
+    };
+    return (visible('#userId') && visible('#userPass'))
+        || Boolean((IDENTITY)());
+}""".replace("IDENTITY", _SESSION_IDENTITY)
+
+
+def _wait_for_session(page, *, login_form=False):
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    predicate = _SESSION_READY if login_form else "() => Boolean((" + _SESSION_IDENTITY + ")())"
+    try:
+        page.wait_for_function(predicate, timeout=30000)
+    except PlaywrightTimeoutError as exc:
+        raise RuntimeError(
+            "NMIS 로그인 화면 또는 로그인 계정 정보가 30초 안에 준비되지 않았습니다. "
+            "Chrome에서 NMIS 화면을 새로고침한 뒤 다시 연결하세요."
+        ) from exc
+
+
+def _require_nmis_origin(page):
+    target = urlsplit(page.url)
+    if target.hostname != "nmis.foodservice.or.kr" or target.scheme not in {"http", "https"}:
+        raise RuntimeError("NMIS 주소가 아닌 페이지에서는 계정을 사용할 수 없습니다.")
+
+
 def require_session_account(page, user_id, password, log=print, *, switch=False):
     from membership_fee_register import ensure_nmis_logged_in
     if not user_id or not password:
         raise RuntimeError("계정을 체크한 뒤 Chrome 연결 열기에서 로그인할 계정을 선택하세요.")
-    target = urlsplit(page.url)
-    if target.hostname != "nmis.foodservice.or.kr" or target.scheme not in {"http", "https"}:
-        raise RuntimeError("NMIS 주소가 아닌 페이지에서는 계정을 사용할 수 없습니다.")
+    _require_nmis_origin(page)
+    if switch:
+        log("NMIS 로그인 화면이 준비될 때까지 기다립니다.")
+    _wait_for_session(page, login_form=True)
+    _require_nmis_origin(page)
     if page.locator("#userId:visible").count():
         ensure_nmis_logged_in(page, user_id, password, log)
-    identity = """() => {
-        const roots=[document.querySelector('[ng-app]'),document.body].filter(Boolean);
-        for(const root of roots){const s=window.angular && angular.element(root).scope();
-            if(s?.userInfo?.userId) return String(s.userInfo.userId);}
-        return '';
-    }"""
+        _wait_for_session(page)
     normalize = lambda value: str(value or "").strip().casefold()
-    current = normalize(page.evaluate(identity))
+    current = normalize(page.evaluate(_SESSION_IDENTITY))
     expected = normalize(user_id)
     if current != expected and switch:
         if not current:
@@ -202,8 +245,10 @@ def require_session_account(page, user_id, password, log=print, *, switch=False)
             if confirm.count():
                 confirm.first.click()
             page.wait_for_timeout(250)
+        _require_nmis_origin(page)
         ensure_nmis_logged_in(page, user_id, password, log)
-        current = normalize(page.evaluate(identity))
+        _wait_for_session(page)
+        current = normalize(page.evaluate(_SESSION_IDENTITY))
     if not current:
         raise RuntimeError("NMIS 로그인 계정을 확인하지 못했습니다. Chrome 연결 열기로 다시 연결하세요.")
     if current != expected:
